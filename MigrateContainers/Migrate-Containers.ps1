@@ -150,8 +150,8 @@
     File Name      : Migrate-Containers.ps1
     Author         : GitHub Copilot
     Prerequisite   : PowerShell 5.1+, Hyper-V PowerShell Module, Azure PowerShell Module
-    Version        : 1.0
-    Date           : 2026-01-30
+    Version        : 1.1
+    Date           : 2026-02-01
     
     DISCLAIMER:
     This Sample Code is provided for the purpose of illustration only and is not intended to be used 
@@ -341,21 +341,27 @@ function Test-AzCopy {
     try {
         $azcopyPath = (Get-Command azcopy -ErrorAction SilentlyContinue).Source
         if ($azcopyPath) {
-            Write-Log "AzCopy found at: $azcopyPath" -Level SUCCESS
-            
+            Write-Log "AzCopy found at: $azcopyPath" -Level SUCCESS            
             # Check if logged in
-            $loginCheck = & azcopy login status 2>&1
-            if ($loginCheck -match "already logged in") {
-                Write-Log "AzCopy is authenticated with Entra ID" -Level SUCCESS
-                return $true
+            $loginCheck = & azcopy login status 2>&1 | Out-String
+        } else {
+            $azCopyPath = Join-Path -Path $PSScriptRoot -ChildPath "azcopy.exe"
+            If (Test-Path $azCopyPath) {
+                Write-Log "AzCopy found at script directory: $azCopyPath" -Level SUCCESS
+                # Check if logged in
+                $loginCheck = & $azCopyPath login status 2>&1 | Out-String
             }
-            else {
-                Write-Log "AzCopy found but not authenticated. Run 'azcopy login' first." -Level WARNING
+            Else {
+                Write-Log "AzCopy not found in path or script directory" -Level WARNING
                 return $false
             }
         }
+        if ($loginCheck -match "Your login session is still active") {
+            Write-Log "AzCopy is authenticated with Entra ID" -Level SUCCESS
+            return $true
+        }
         else {
-            Write-Log "AzCopy not found in PATH" -Level WARNING
+            Write-Log "AzCopy found but not authenticated. Run 'azcopy login' first." -Level WARNING
             return $false
         }
     }
@@ -413,8 +419,8 @@ function Get-FSLogixContainers {
     
     try {
         $sourceUNC = "\\$StorageAccountName.file.$script:storageEndpointSuffix\$ShareName"
-        Write-Log "Enumerating FSLogix profiles from $sourceUNC"        
-      
+        Write-Log "Enumerating FSLogix profiles from $sourceUNC"
+        
         # Map drive temporarily using Entra ID authentication
         $driveLetter = Get-AvailableDriveLetter
         
@@ -570,13 +576,13 @@ function Invoke-ConcurrentMigration {
             
             # Download metadata files
             $sourceFolder = "https://$SourceStorageAccount.file.$StorageEndpointSuffix/$SourceShare/$($Container.FolderName)"
-            & azcopy copy "$sourceFolder/*" $threadTempPath --recursive=false --exclude-pattern="*.vhd" --overwrite=true 2>&1 | Out-Null
+            & azcopy copy "$sourceFolder/*" $threadTempPath --exclude-pattern="*.vhd;*.backup" --overwrite=true 2>&1 | Out-Null
             
             # Upload to destination
             $destURL = "https://$DestStorageAccount.file.$StorageEndpointSuffix/$DestShare/$destFolderName"
             
             Write-ThreadLog "Uploading: $destFolderName"
-            $output = & azcopy copy "$threadTempPath\*" $destURL --recursive=false --overwrite=true 2>&1
+            $output = & azcopy copy "$threadTempPath\*" $destURL --overwrite=true 2>&1
             
             if ($LASTEXITCODE -ne 0) {
                 throw "AzCopy upload failed: $output"
@@ -592,7 +598,7 @@ function Invoke-ConcurrentMigration {
                 SourceFolder = $Container.FolderName
                 DestFolder = $destFolderName
                 SourceVHD = $Container.VHDName
-                DestVHDX = $vhdxName
+                DestOutput = $vhdxName
                 OriginalSize = $Container.VHDSize
                 Error = $null
             }
@@ -606,7 +612,7 @@ function Invoke-ConcurrentMigration {
                 SourceFolder = $Container.FolderName
                 DestFolder = $null
                 SourceVHD = $Container.VHDName
-                DestVHDX = $null
+                DestOutput = $null
                 OriginalSize = $Container.VHDSize
                 Error = $_.Exception.Message
             }
@@ -679,7 +685,7 @@ function Copy-WithAzCopy {
         $azcopyArgs = @('copy', $SourcePath, $DestinationPath, '--overwrite=true')
         
         if ($IsRecursive) {
-            $azcopyArgs += '--recursive=true'
+            $azcopyArgs += '--recursive'
         }
         
         $output = & azcopy @azcopyArgs 2>&1 | Out-String
@@ -954,7 +960,7 @@ function Migrate-FSLogixContainer {
             Write-Log "Conversion successful. $OutputType size: $([math]::Round((Get-Item $outputTempPath).Length / 1GB, 2)) GB" -Level SUCCESS
             
             # Copy metadata files to temp
-            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -ne '.vhd' }
+            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.backup') }
             foreach ($file in $metadataFiles) {
                 $destFile = Join-Path $profileTempPath $file.Name
                 Copy-Item -Path $file.FullName -Destination $destFile -Force
@@ -963,7 +969,7 @@ function Migrate-FSLogixContainer {
             # Copy all files to destination with AzCopy
             Write-Log "Using AzCopy to copy files to destination: $destProfilePath"
             $destURL = "https://$DestStorageAccount.file.$script:storageEndpointSuffix/$DestShare/$destFolderName"
-            $azCopySuccess = Copy-WithAzCopy -SourcePath "$profileTempPath\*" -DestinationPath $destURL -IsRecursive $true
+            $azCopySuccess = Copy-WithAzCopy -SourcePath "$profileTempPath\*" -DestinationPath $destURL -IsRecursive $false
             if (!$azCopySuccess) {
                 Write-Log "AzCopy failed, falling back to Copy-Item" -Level WARNING
                 Copy-Item -Path "$profileTempPath\*" -Destination $destProfilePath -Force -Recurse
@@ -985,7 +991,7 @@ function Migrate-FSLogixContainer {
             
             # If in-place VHD conversion was successful, remove backup
             if ($SameLocation -and $OutputType -eq 'VHD') {
-                $backupPath = "$destOutputPath.backup"
+                $backupPath = Join-Path $sourceProfilePath "$($Container.VHDName).backup"
                 if (Test-Path $backupPath) {
                     Write-Log "Conversion successful, removing backup: $backupPath"
                     Remove-Item -Path $backupPath -Force
@@ -993,7 +999,7 @@ function Migrate-FSLogixContainer {
             }
             
             # Copy metadata files directly from source to destination
-            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -ne '.vhd' }
+            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.backup') }
             foreach ($file in $metadataFiles) {
                 $destFile = Join-Path $destProfilePath $file.Name
                 Copy-Item -Path $file.FullName -Destination $destFile -Force
@@ -1084,6 +1090,12 @@ if ($UseAzCopy) {
     if (-not (Test-AzCopy)) {
         Write-Log "AzCopy requested but not available or not authenticated. Install AzCopy and run 'azcopy login'." -Level ERROR
         Write-Log "Continuing without AzCopy (will use direct UNC conversion instead)" -Level WARNING
+        $UseAzCopy = $false
+    }
+    
+    # Check for incompatible combination: AzCopy with in-place VHD optimization
+    if ($UseAzCopy -and $sameLocation -and $OutputType -eq 'VHD') {
+        Write-Log "Warning: AzCopy cannot be used with in-place VHD optimization. Disabling AzCopy." -Level WARNING
         $UseAzCopy = $false
     }
 }
