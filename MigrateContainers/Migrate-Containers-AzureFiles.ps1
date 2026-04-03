@@ -259,7 +259,10 @@ param(
     [string[]]$AdministratorGroupSIDs = @('S-1-5-32-544'),
 
     [Parameter(Mandatory = $false)]
-    [string[]]$UserGroupSIDs = @()
+    [string[]]$UserGroupSIDs = @(),
+
+    [Parameter(Mandatory = $false)]
+    [switch]$Force
 )
 
 #region Initialize
@@ -433,16 +436,31 @@ function Get-FSLogixContainers {
         
         $Containers = @()
         foreach ($folder in $folders) {
-            # Look for VHD files
-            $vhdFiles = Get-ChildItem -Path $folder.FullName -Filter "*.vhd" -File -ErrorAction SilentlyContinue
+            # Look for VHD and VHDX files
+            $vhdFiles = Get-ChildItem -Path $folder.FullName -Filter "*.vhd*" -File -ErrorAction SilentlyContinue | 
+                Where-Object { $_.Extension -in '.vhd', '.vhdx' }
             
             foreach ($vhd in $vhdFiles) {
+                # Get VHD info to check if it's dynamic
+                try {
+                    $vhdInfo = Get-VHD -Path $vhd.FullName -ErrorAction Stop
+                    $isDynamic = ($vhdInfo.VhdType -eq 'Dynamic')
+                    $vhdFormat = $vhdInfo.VhdFormat
+                }
+                catch {
+                    Write-Log "Warning: Could not read VHD info for $($vhd.FullName): $_" -Level WARNING
+                    $isDynamic = $false
+                    $vhdFormat = if ($vhd.Extension -eq '.vhdx') { 'VHDX' } else { 'VHD' }
+                }
+                
                 $Containers += [PSCustomObject]@{
                     FolderName = $folder.Name
                     FolderPath = $folder.FullName
                     VHDName = $vhd.Name
                     VHDPath = $vhd.FullName
                     VHDSize = $vhd.Length
+                    IsDynamic = $isDynamic
+                    VhdFormat = $vhdFormat
                 }
             }
         }
@@ -450,7 +468,12 @@ function Get-FSLogixContainers {
         # Remove drive
         Remove-PSDrive -Name $driveLetter -Force
         
-        Write-Log "Found $($Containers.Count) VHD files to migrate" -Level SUCCESS
+        Write-Log "Found $($Containers.Count) VHD/VHDX files to migrate" -Level SUCCESS
+        
+        # Report on disk types
+        $dynamicCount = ($Containers | Where-Object { $_.IsDynamic }).Count
+        $fixedCount = $Containers.Count - $dynamicCount
+        Write-Log "Dynamic disks: $dynamicCount, Fixed disks: $fixedCount"
         return $Containers
     }
     catch {
@@ -513,7 +536,8 @@ function Invoke-ConcurrentMigration {
         [bool]$Rename,
         [string]$TempPath,
         [int]$MaxConcurrent,
-        [hashtable]$ScriptVariables
+        [hashtable]$ScriptVariables,
+        [bool]$ForceConversion
     )
     
     # Create runspace pool
@@ -531,7 +555,8 @@ function Invoke-ConcurrentMigration {
             $Rename,
             $TempPath,
             $StorageEndpointSuffix,
-            $LogFile
+            $LogFile,
+            $ForceConversion
         )
         
         function Write-ThreadLog {
@@ -632,6 +657,7 @@ function Invoke-ConcurrentMigration {
             TempPath = $TempPath
             StorageEndpointSuffix = $ScriptVariables.storageEndpointSuffix
             LogFile = $ScriptVariables.logFile
+            ForceConversion = $ForceConversion
         })
         
         $powershell.RunspacePool = $runspacePool
@@ -888,7 +914,8 @@ function Migrate-FSLogixContainer {
         [string]$TempPath,
         [bool]$UseAzCopy,
         [string]$OutputType,
-        [bool]$SameLocation
+        [bool]$SameLocation,
+        [bool]$ForceConversion
     )
     
     try {
@@ -912,25 +939,56 @@ function Migrate-FSLogixContainer {
         $sourceVHDPath = Join-Path $sourceProfilePath $Container.VHDName
         $destOutputPath = Join-Path $destProfilePath $outputFileName
         
-        # Handle in-place VHD conversion (backup original first)
-        if ($SameLocation -and $OutputType -eq 'VHD') {
-            $backupPath = "$sourceVHDPath.backup"
+        # Determine if conversion is needed
+        $needsConversion = $false
+        $conversionReason = ""
+        $convertedSize = $null
+        
+        if ($ForceConversion) {
+            $needsConversion = $true
+            $conversionReason = "Force parameter specified"
+        }
+        elseif (!$Container.IsDynamic) {
+            $needsConversion = $true
+            $conversionReason = "Source is fixed disk"
+        }
+        elseif ($Container.VhdFormat -ne $OutputType) {
+            $needsConversion = $true
+            $conversionReason = "Format conversion ($($Container.VhdFormat) -> $OutputType)"
+        }
+        elseif ($SameLocation) {
+            # Already dynamic, same location, no force = skip
+            Write-Log "Skipping $($Container.VHDName) - already dynamic $($Container.VhdFormat) at destination" -Level SUCCESS
             
-            # Remove old backup if exists
-            if (Test-Path $backupPath) {
-                Write-Log "Removing old backup: $backupPath"
-                Remove-Item -Path $backupPath -Force
+            return [PSCustomObject]@{
+                SourceFolder = $Container.FolderName
+                DestFolder = $destFolderName
+                SourceVHD = $Container.VHDName
+                DestOutput = $Container.VHDName
+                OriginalSize = $Container.VHDSize
+                ConvertedSize = $Container.VHDSize
+                Skipped = $true
+                Success = $true
+                Error = $null
             }
-            
-            # Rename original VHD as backup
-            Write-Log "Backing up original VHD: $sourceVHDPath -> $backupPath"
-            Rename-Item -Path $sourceVHDPath -NewName "$($Container.VHDName).backup" -Force
-            
-            # Update source path to backup for conversion
-            $sourceVHDPath = $backupPath
         }
         
-        if ($UseAzCopy) {
+        if (!$needsConversion) {
+            # Already dynamic and correct format - just copy directly
+            Write-Log "Source is already dynamic $($Container.VhdFormat) - copying directly (no conversion needed)"
+            Copy-Item -Path $sourceVHDPath -Destination $destOutputPath -Force
+            $convertedSize = $Container.VHDSize
+            
+            # Copy metadata files
+            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.vhdx', '.backup') }
+            foreach ($file in $metadataFiles) {
+                $destFile = Join-Path $destProfilePath $file.Name
+                Copy-Item -Path $file.FullName -Destination $destFile -Force
+            }
+        }
+        elseif ($UseAzCopy) {
+            # Conversion needed with AzCopy workflow
+            Write-Log "Conversion needed: $conversionReason"
             # Use temp location for AzCopy workflow
             $profileTempPath = Join-Path $TempPath $Container.FolderName
             if (!(Test-Path $profileTempPath)) {
@@ -977,9 +1035,12 @@ function Migrate-FSLogixContainer {
             
             # Cleanup temp
             Remove-Item -Path $profileTempPath -Recurse -Force -ErrorAction SilentlyContinue
+            
+            $convertedSize = (Get-Item $destOutputPath).Length
         }
         else {
-            # Direct UNC path conversion - no temp needed!
+            # Conversion needed with direct UNC path
+            Write-Log "Conversion needed: $conversionReason"
             Write-Log "Converting VHD to dynamic $OutputType directly: $sourceVHDPath -> $destOutputPath"
             Convert-VHD -Path $sourceVHDPath -DestinationPath $destOutputPath -VHDType Dynamic
             
@@ -988,18 +1049,10 @@ function Migrate-FSLogixContainer {
             }
             
             Write-Log "Conversion successful. $OutputType size: $([math]::Round((Get-Item $destOutputPath).Length / 1GB, 2)) GB" -Level SUCCESS
-            
-            # If in-place VHD conversion was successful, remove backup
-            if ($SameLocation -and $OutputType -eq 'VHD') {
-                $backupPath = Join-Path $sourceProfilePath "$($Container.VHDName).backup"
-                if (Test-Path $backupPath) {
-                    Write-Log "Conversion successful, removing backup: $backupPath"
-                    Remove-Item -Path $backupPath -Force
-                }
-            }
+            $convertedSize = (Get-Item $destOutputPath).Length
             
             # Copy metadata files directly from source to destination
-            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.backup') }
+            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.vhdx', '.backup') }
             foreach ($file in $metadataFiles) {
                 $destFile = Join-Path $destProfilePath $file.Name
                 Copy-Item -Path $file.FullName -Destination $destFile -Force
@@ -1027,6 +1080,8 @@ function Migrate-FSLogixContainer {
             SourceVHD = $Container.VHDName
             DestOutput = $outputFileName
             OriginalSize = $Container.VHDSize
+            ConvertedSize = $convertedSize
+            Skipped = $false
             Success = $true
             Error = $null
         }
@@ -1040,6 +1095,8 @@ function Migrate-FSLogixContainer {
             SourceVHD = $Container.VHDName
             DestOutput = $null
             OriginalSize = $Container.VHDSize
+            ConvertedSize = $null
+            Skipped = $false
             Success = $false
             Error = $_.Exception.Message
         }
@@ -1261,7 +1318,8 @@ if ($UseAzCopy -and $ConcurrentJobs -gt 1) {
         -Rename $RenameFolders.IsPresent `
         -TempPath $TempPath `
         -MaxConcurrent $ConcurrentJobs `
-        -ScriptVariables $scriptVars
+        -ScriptVariables $scriptVars `
+        -ForceConversion $Force
     
     # Set ACLs on all migrated profiles
     Write-Log "Setting ACLs on migrated profiles..."
@@ -1306,7 +1364,8 @@ else {
             -TempPath $TempPath `
             -UseAzCopy $UseAzCopy `
             -OutputType $OutputType `
-            -SameLocation $sameLocation
+            -SameLocation $sameLocation `
+            -ForceConversion $Force
         
         $results += $result
         

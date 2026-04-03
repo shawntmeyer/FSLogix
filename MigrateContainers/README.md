@@ -1,157 +1,123 @@
-# FSLogix Profile Migration Script
+# FSLogix Profile Container Migration Scripts
 
-A comprehensive PowerShell script for migrating FSLogix user profile containers between Azure Storage Accounts and File Shares with VHD/VHDX conversion, ACL management, and optional folder renaming.
+A collection of PowerShell scripts for migrating FSLogix user profile containers between different storage platforms with VHD/VHDX conversion, ACL management, and comprehensive logging.
 
-## ⚠️ Disclaimer
+## 📋 Overview
 
-**This sample code is provided for illustration purposes only and is not intended for production use without thorough testing.** The code is provided "AS IS" without warranty of any kind. See the full disclaimer in the script header for complete terms. Always test in a non-production environment before deploying to production systems.
+This repository provides two specialized migration scripts, each optimized for different storage scenarios:
 
-## Overview
+1. **[Migrate-Containers.ps1](README-AzureFiles.md)** - For **Azure Files** migrations
+2. **[Migrate-Containers-Generic.ps1](README-Generic.md)** - For **generic UNC paths** (Azure NetApp Files, file servers, DFS, etc.)
 
-This script automates the migration of FSLogix profile containers (VHD/VHDX files) between Azure File Shares while:
+Both scripts share common functionality through the `FSLogixMigrationCommon.psm1` module and provide:
 
-- Converting VHD to dynamic VHDX format (or optimizing VHD to dynamic VHD)
-- Setting proper NTFS permissions and ownership
-- Optionally renaming folders from `SID_username` to `username_SID` format
-- Supporting both direct conversion and concurrent processing with AzCopy
-- Providing comprehensive logging and progress tracking
+✅ VHD to VHDX conversion (or VHD to dynamic VHD optimization)  
+✅ Automatic ACL configuration with Creator Owner permissions  
+✅ Optional folder renaming (SID_username ↔ username_SID)  
+✅ Comprehensive logging and error handling  
+✅ Progress tracking and CSV result exports  
 
-## Features
+## 🎯 Which Script Should I Use?
 
-✅ **Format Conversion**: VHD → VHDX or VHD → Dynamic VHD  
-✅ **Cross-Account Migration**: Move profiles between storage accounts  
-✅ **In-Place Optimization**: Convert profiles within same storage account  
-✅ **Folder Renaming**: Change from SID_username to username_SID format  
-✅ **ACL Management**: Automatically set ownership and permissions  
-✅ **Dual Authentication**: Entra ID (recommended) or Storage Account Keys  
-✅ **Concurrent Processing**: AzCopy with parallel jobs for faster migrations  
-✅ **Comprehensive Logging**: Console output + detailed log files + CSV results  
-✅ **Progress Tracking**: Real-time progress indicators  
-✅ **Error Handling**: Graceful error handling with detailed reporting  
-✅ **Multi-Cloud Support**: Works with Azure Commercial, Government, China
+Use this decision guide to choose the right script for your migration scenario:
 
-## Prerequisites
+### Use **Migrate-Containers.ps1** (Azure Files) when:
 
-### Required Software
+✅ Migrating **between Azure Storage Accounts**  
+✅ Migrating **between Azure Files shares** (same or different accounts)  
+✅ You have **Azure PowerShell module (Az)** available  
+✅ You want to use **Azure RBAC** (Entra ID) or **Storage Account Keys** for authentication  
+✅ You want **AzCopy** for Azure-optimized transfers with concurrency  
+✅ Your destination is clearly Azure Files  
 
-| Component | Version | Installation |
-| --------- | ------- | ------------ |
-| **PowerShell** | 5.1 or later | Pre-installed on Windows |
-| **Hyper-V PowerShell Module** | Latest | `Install-WindowsFeature -Name Hyper-V-PowerShell` |
-| **Azure PowerShell Module** | Latest | `Install-Module -Name Az -Repository PSGallery -Force` |
-| **AzCopy** (optional) | v10 or later | [Download](https://aka.ms/downloadazcopy) |
+**Example Scenarios:**
+- Azure Files → Azure Files (cross-region)
+- Azure Files Storage Account A → Storage Account B
+- On-premises → Azure Files (with Azure PowerShell setup)
 
-### Azure Permissions
+**[View Azure Files Documentation →](README-AzureFiles.md)**
 
-Choose ONE of the following authentication methods:
+---
 
-#### Option 1: Entra ID Authentication (Recommended)
+### Use **Migrate-Containers-Generic.ps1** (Generic UNC) when:
 
-**Required RBAC Role:**
+✅ Migrating **to/from Azure NetApp Files (ANF)**  
+✅ Migrating **between Windows File Servers**  
+✅ Migrating **using DFS namespaces**  
+✅ You **don't have** or **prefer not to use** Azure PowerShell module  
+✅ You want to use **PSCredential** or **current Windows identity** for authentication  
+✅ You want **Robocopy** with multi-threading for transfers  
+✅ Working with any SMB share accessible via UNC path  
 
-- **Storage File Data SMB Share Elevated Contributor**
-- **Role ID**: `a7264617-510b-434b-a828-9731dc254ea7`
-- **Scope**: Both source AND destination storage accounts
-- **Why**: Allows full NTFS permissions including ownership and ACL management
+**Example Scenarios:**
+- Azure NetApp Files → Azure NetApp Files
+- File Server → Azure NetApp Files
+- File Server → File Server
+- DFS → Azure NetApp Files
+- On-premises → any SMB share
 
-**How to Assign:**
+**[View Generic UNC Documentation →](README-Generic.md)**
 
-```powershell
-# Login to Azure
-Connect-AzAccount
+---
 
-# Assign role to storage account
-$storageAccount = Get-AzStorageAccount -ResourceGroupName "rg-name" -Name "storageaccount"
-$userId = (Get-AzADUser -UserPrincipalName "user@domain.com").Id
+## 📊 Feature Comparison
 
-New-AzRoleAssignment `
-    -ObjectId $userId `
-    -RoleDefinitionName "Storage File Data SMB Share Elevated Contributor" `
-    -Scope $storageAccount.Id
-```
+| Feature | Azure Files Script | Generic UNC Script |
+|---------|-------------------|-------------------|
+| **Destination Types** | Azure Files only | Any SMB share (ANF, file servers, DFS, NAS) |
+| **Authentication** | Entra ID (RBAC), Storage Keys | Windows identity, PSCredential |
+| **Transfer Tool** | AzCopy or Direct UNC | Robocopy (multi-threaded) |
+| **Required Modules** | Az PowerShell | None (uses native Windows tools) |
+| **Azure Integration** | Full (storage account, keys, endpoints) | None (works with any UNC path) |
+| **Concurrent Processing** | Yes (AzCopy) | Yes (PowerShell runspaces) |
+| **Network Requirements** | Azure connectivity (443, 445) | SMB connectivity (445) |
+| **Best Performance** | Same Azure region | Same network segment |
+| **Cross-Cloud Support** | Azure Commercial, Gov, China | Any SMB-accessible location |
 
-[Learn more about Storage File RBAC roles](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/storage#storage-file-data-smb-share-elevated-contributor)
+## 🚀 Quick Start
 
-#### Option 2: Storage Account Key Authentication
+### Installation
 
-**Required Permission:**
-
-- Permission to read storage account keys
-- Typically: Contributor, Storage Account Contributor, or Owner role on storage account
-
-**Note**: Less secure than Entra ID but simpler to configure for testing.
-
-### Network Requirements
-
-- **Port 443**: HTTPS access to Azure (management operations)
-- **Port 445**: SMB access to Azure Files (data transfer)
-- **Bandwidth**: 1Gbps recommended for large migrations
-- **Same VNet**: Best performance when VM is in same VNet as storage accounts
-
-## Installation
-
-1. **Clone or download the script:**
+1. **Clone the repository:**
 
 ```powershell
 git clone https://github.com/shawntmeyer/FSLogix.git
-cd FSLogix\migrateStorage
+cd FSLogix\MigrateContainers
 ```
 
-1. **Install prerequisites:**
+2. **Verify you have the required files:**
 
 ```powershell
-# Install Hyper-V PowerShell module (requires restart)
+Get-ChildItem -Path . -Filter "*.ps1","*.psm1"
+
+# You should see:
+# - Migrate-Containers.ps1          (Azure Files script)
+# - Migrate-Containers-Generic.ps1  (Generic UNC script)
+# - FSLogixMigrationCommon.psm1     (Shared functions)
+```
+
+3. **Install prerequisites:**
+
+```powershell
+# Hyper-V PowerShell module (required by both scripts)
 Install-WindowsFeature -Name Hyper-V-PowerShell -IncludeManagementTools
 
-# Install Azure PowerShell module
-Install-Module -Name Az -Repository PSGallery -Force -AllowClobber
+# Azure PowerShell module (only for Azure Files script)
+Install-Module -Name Az -Repository PSGallery -Force
 
-# Install AzCopy (optional - for concurrent processing)
+# AzCopy (optional, only for Azure Files script concurrent processing)
 # Download from https://aka.ms/downloadazcopy
-# Extract and add to PATH, or place in script directory
 ```
 
-1. **Verify installation:**
+### Quick Examples
 
-```powershell
-# Test Hyper-V module
-Get-Module -ListAvailable -Name Hyper-V
-
-# Test Azure module
-Get-Module -ListAvailable -Name Az
-
-# Test AzCopy (optional)
-azcopy --version
-```
-
-## Usage
-
-### Basic Syntax
-
-```powershell
-.\Migrate-Containers.ps1 `
-    -SourceStorageAccountName <string> `
-    -SourceShareName <string> `
-    [-DestStorageAccountName <string>] `
-    [-DestShareName <string>] `
-    [-OutputType <VHD|VHDX>] `
-    [-RenameFolders] `
-    [-UseStorageKey] `
-    [-UseAzCopy] `
-    [-ConcurrentJobs <int>]
-```
-
-### Example Scenarios
-
-#### 1. Simple Migration (VHD → VHDX) - Different Storage Accounts
-
-**Scenario**: Migrate all profiles from old storage to new storage with VHDX conversion
+#### Azure Files Migration
 
 ```powershell
 # Login to Azure
 Connect-AzAccount
 
-# Run migration
+# Migrate between Azure Storage Accounts
 .\Migrate-Containers.ps1 `
     -SourceStorageAccountName "oldstorageaccount" `
     -SourceShareName "profiles" `
@@ -159,703 +125,302 @@ Connect-AzAccount
     -DestShareName "profiles"
 ```
 
-**Expected Time**: ~2 minutes per 10GB profile (sequential)
-
----
-
-#### 2. Large Migration with Concurrent Processing
-
-**Scenario**: Migrate 100+ profiles quickly using parallel processing
+#### Generic UNC Migration
 
 ```powershell
-# Login to Azure and AzCopy
-Connect-AzAccount
-azcopy login
-
-# Run migration with 8 concurrent jobs
-.\Migrate-Containers.ps1 `
-    -SourceStorageAccountName "oldsa" `
-    -SourceShareName "profiles" `
-    -DestStorageAccountName "newsa" `
-    -DestShareName "profiles" `
-    -UseAzCopy `
-    -ConcurrentJobs 8
+# Migrate between any UNC paths (e.g., Azure NetApp Files)
+.\Migrate-Containers-Generic.ps1 `
+    -SourceUNCPath "\\fileserver\profiles" `
+    -DestinationUNCPath "\\10.0.1.10\anf-profiles"
 ```
 
-**Expected Time**: ~45-60 minutes for 100x10GB profiles
+## 📁 Repository Structure
 
----
-
-#### 3. In-Place VHD Optimization
-
-**Scenario**: Optimize existing VHD files to dynamic VHD format (reclaim space)
-
-```powershell
-Connect-AzAccount
-
-.\Migrate-Containers.ps1 `
-    -SourceStorageAccountName "storageaccount" `
-    -SourceShareName "profiles" `
-    -OutputType VHD
+```
+MigrateContainers/
+├── README.md                         # This file (decision guide)
+├── README-AzureFiles.md              # Azure Files script documentation
+├── README-Generic.md                 # Generic UNC script documentation
+├── Migrate-Containers.ps1            # Azure Files migration script
+├── Migrate-Containers-Generic.ps1    # Generic UNC migration script
+├── FSLogixMigrationCommon.psm1       # Shared function module
+└── Logs/                             # Auto-created log directory
 ```
 
-**Note**: Original VHD is backed up as `.vhd.backup` during conversion
+## 🔍 Common Use Cases
 
----
+### Use Case 1: Azure Files to Azure Files (Same Region)
 
-#### 4. Migration with Folder Renaming
+**Scenario**: Migrating between storage accounts in the same Azure region
 
-**Scenario**: Change folder naming convention from `SID_username` to `username_SID`
+**Recommended Script**: `Migrate-Containers.ps1` (Azure Files)
 
+**Why**: Azure-optimized with Entra ID authentication, fast transfers within region
+
+**Example**:
 ```powershell
 Connect-AzAccount
-
-.\Migrate-Containers.ps1 `
-    -SourceStorageAccountName "storageaccount" `
-    -SourceShareName "profiles" `
-    -RenameFolders
-```
-
-**Before**: `S-1-5-21-xxx_jdoe`  
-**After**: `jdoe_S-1-5-21-xxx`
-
----
-
-#### 5. Using Storage Account Key Authentication
-
-**Scenario**: Use storage keys instead of Entra ID (for testing or when RBAC not configured)
-
-```powershell
-Connect-AzAccount
-
-.\Migrate-Containers.ps1 `
-    -SourceStorageAccountName "storageaccount" `
-    -SourceShareName "profiles" `
-    -UseStorageKey
+.\Migrate-Containers.ps1 -SourceStorageAccountName "oldsa" -SourceShareName "profiles" `
+    -DestStorageAccountName "newsa" -DestShareName "profiles" -UseAzCopy -ConcurrentJobs 8
 ```
 
 ---
 
-#### 6. Custom Administrator Groups for ACLs
+### Use Case 2: On-premises File Server to Azure NetApp Files
 
-**Scenario**: Grant specific domain admin groups full control
+**Scenario**: Migrating from Windows file server to ANF as part of Azure adoption
 
+**Recommended Script**: `Migrate-Containers-Generic.ps1`
+
+**Why**: Works with any UNC path, no Azure PowerShell required, Robocopy handles SMB well
+
+**Example**:
 ```powershell
-Connect-AzAccount
-
-.\Migrate-Containers.ps1 `
-    -SourceStorageAccountName "storageaccount" `
-    -SourceShareName "profiles" `
-    -AdministratorGroupSIDs @('S-1-5-32-544', 'S-1-5-21-xxx-512')
+.\Migrate-Containers-Generic.ps1 -SourceUNCPath "\\onprem-fs\profiles" `
+    -DestinationUNCPath "\\10.0.1.10\profiles" -ConcurrentProfiles 4 -RobocopyThreads 8
 ```
 
 ---
 
-#### 7. Cross-Region Migration
+### Use Case 3: Azure Files to Azure NetApp Files
 
-**Scenario**: Migrate profiles from one Azure region to another
+**Scenario**: Moving from Azure Files to ANF for higher performance/features
 
+**Recommended Script**: `Migrate-Containers-Generic.ps1`
+
+**Why**: ANF is accessed via UNC path, not Azure Storage API. Generic script is appropriate.
+
+**Example**:
+```powershell
+# Map Azure Files using Entra ID or storage key first
+$sourceCred = Get-Credential
+.\Migrate-Containers-Generic.ps1 `
+    -SourceUNCPath "\\storageaccount.file.core.windows.net\profiles" `
+    -DestinationUNCPath "\\10.0.1.10\anf-profiles" `
+    -SourceCredential $sourceCred
+```
+
+---
+
+### Use Case 4: Cross-Region Azure Files Migration
+
+**Scenario**: Migrating profiles from one Azure region to another (e.g., East US to West Europe)
+
+**Recommended Script**: `Migrate-Containers.ps1` (Azure Files)
+
+**Why**: AzCopy handles cross-region efficiently, Azure-native authentication
+
+**Example**:
 ```powershell
 Connect-AzAccount
 azcopy login
-
-.\Migrate-Containers.ps1 `
-    -SourceStorageAccountName "useast-storage" `
-    -SourceShareName "profiles" `
-    -DestStorageAccountName "westeurope-storage" `
-    -DestShareName "profiles" `
-    -UseAzCopy `
-    -ConcurrentJobs 4
+.\Migrate-Containers.ps1 -SourceStorageAccountName "useast-sa" -SourceShareName "profiles" `
+    -DestStorageAccountName "westeu-sa" -DestShareName "profiles" `
+    -UseAzCopy -ConcurrentJobs 8
 ```
 
-**Note**: Higher latency may increase migration time
+---
 
-## Parameters Reference
+### Use Case 5: DFS Namespace to Azure NetApp Files
 
-| Parameter | Type | Default | Required | Description |
-|-----------|------|---------|----------|-------------|
-| `SourceStorageAccountName` | String | - | **Yes** | Source storage account name |
-| `SourceShareName` | String | - | **Yes** | Source file share name |
-| `DestStorageAccountName` | String | Same as source | No | Destination storage account |
-| `DestShareName` | String | Same as source | No | Destination file share |
-| `OutputType` | String | `VHDX` | No | Output format: `VHD` or `VHDX` |
-| `RenameFolders` | Switch | `$false` | No | Rename SID_user to user_SID |
-| `UseStorageKey` | Switch | `$false` | No | Use storage keys instead of Entra ID |
-| `UseAzCopy` | Switch | `$false` | No | Enable AzCopy with concurrency |
-| `ConcurrentJobs` | Int | `4` | No | Number of parallel jobs (AzCopy only) |
-| `LogPath` | String | `.\Logs` | No | Directory for log files |
-| `TempPath` | String | `$env:TEMP\FSLogixMigration` | No | Temp directory (AzCopy only) |
-| `AdministratorGroupSIDs` | String[] | `@('S-1-5-32-544')` | No | Admin group SIDs for ACLs |
-| `UserGroupSIDs` | String[] | `@()` | No | User group SIDs for ACLs |
+**Scenario**: Migrating from DFS namespace to ANF
 
-## Performance Considerations
+**Recommended Script**: `Migrate-Containers-Generic.ps1`
 
-### Direct UNC Method (Default)
+**Why**: DFS is a UNC path, no Azure-specific features needed
 
-**Characteristics:**
-
-- Sequential processing (one profile at a time)
-- No local disk space required
-- Convert-VHD streams directly from source to destination
-- Simple, predictable, reliable
-
-**Best For:**
-
-- Small-medium migrations (<50 profiles)
-- Same VNet deployments
-- Limited local disk space
-- Simplicity over speed
-
-**Performance:**
-
-- **Network**: 1Gbps = ~100MB/s sustained
-- **Per Profile**: ~2 minutes for 10GB
-- **100 Profiles**: ~3.4 hours
-
-### AzCopy with Concurrency
-
-**Characteristics:**
-
-- Parallel processing (multiple profiles simultaneously)
-- Requires local disk space for temp files
-- Downloads → Converts → Uploads
-- Better network and CPU utilization
-
-**Best For:**
-
-- Large migrations (50+ profiles)
-- Cross-region migrations
-- When time is critical
-- Adequate local storage available
-
-**Performance:**
-
-- **Network**: Near line-rate utilization
-- **Per Profile**: ~45-60 seconds (with 8 jobs)
-- **100 Profiles**: ~45-60 minutes
-
-**Recommended Concurrent Jobs:**
-
-| Profile Count | Recommended Jobs | Estimated Time (100x10GB) |
-| ------------- | ---------------- | ------------------------- |
-| <25 | 2-4 | ~90 minutes |
-| 25-100 | 4-8 | ~45-60 minutes |
-| >100 | 8-12 | ~30-45 minutes |
-
-**Note**: Higher concurrency requires more CPU, memory, and local disk space.
-
-## Output and Logging
-
-### Console Output
-
-Real-time progress with color-coded messages:
-
-- **Green**: Success operations
-- **Yellow**: Warnings
-- **Red**: Errors
-- **White**: Information
-
-### Log Files
-
-Located in `LogPath` (default: `.\Logs\`):
-
-1. **Main Log**: `FSLogixMigration_YYYYMMDD_HHMMSS.log`
-   - Detailed timestamped log of all operations
-   - Includes debug information
-   - Used for troubleshooting
-
-2. **Results CSV**: `MigrationResults_YYYYMMDD_HHMMSS.csv`
-   - Summary of each profile migration
-   - Columns: SourceFolder, DestFolder, SourceVHD, DestOutput, OriginalSize, Success, Error
-   - Import into Excel for analysis
-
-### Example Output
-
-```
-[2026-01-30 10:00:00] [INFO] FSLogix Profile Migration Script
-[2026-01-30 10:00:00] [INFO] Authentication Method: Entra ID (Recommended)
-[2026-01-30 10:00:00] [INFO] Source: oldsa\profiles
-[2026-01-30 10:00:00] [INFO] Destination: newsa\profiles
-[2026-01-30 10:00:05] [SUCCESS] Found 100 VHD files to migrate
-[2026-01-30 10:00:10] [INFO] Starting migration for: S-1-5-21-xxx_jdoe
-[2026-01-30 10:02:05] [SUCCESS] Conversion successful. VHDX size: 8.23 GB
-[2026-01-30 10:02:08] [SUCCESS] Migration completed successfully
-...
-[2026-01-30 13:25:15] [INFO] Migration Summary
-[2026-01-30 13:25:15] [SUCCESS] Total Profiles: 100
-[2026-01-30 13:25:15] [SUCCESS] Successful: 100
-[2026-01-30 13:25:15] [INFO] Failed: 0
-[2026-01-30 13:25:15] [INFO] Duration: 03:25:10
-```
-
-## ACL Configuration
-
-The script automatically configures NTFS permissions on migrated profiles:
-
-### Share Root Permissions
-
-Applied when migrating to a **new** destination:
-
-| Principal | Permission | Applies To |
-| --------- | ---------- | ---------- |
-| SYSTEM | Full Control | This folder, subfolders, and files |
-| Administrators* | Full Control | This folder, subfolders, and files |
-| Creator Owner | Full Control | Subfolders and files only |
-| Authenticated Users** | Modify | This folder only |
-
-*Configurable via `-AdministratorGroupSIDs`  
-**Configurable via `-UserGroupSIDs` (or custom groups)
-
-### Profile Folder Permissions
-
-For each profile folder:
-
-1. **Ownership** set to user (based on SID extracted from folder name)
-2. **Inheritance enabled** from share root
-3. **Creator Owner permissions** automatically apply to the owner
-
-**Result**: User gets full control of their profile via Creator Owner inheritance
-
-## Troubleshooting
-
-### Common Issues
-
-#### Access Denied Errors
-
-**Symptom**: `Access is denied` when accessing storage or setting ACLs
-
-**Solutions**:
-
-1. Verify RBAC role assignment:
-
+**Example**:
 ```powershell
-Get-AzRoleAssignment `
-    -Scope "/subscriptions/{subscription-id}/resourceGroups/{rg}/providers/Microsoft.Storage/storageAccounts/{sa}" `
-    -SignInName "user@domain.com"
+.\Migrate-Containers-Generic.ps1 -SourceUNCPath "\\contoso.com\dfs\profiles" `
+    -DestinationUNCPath "\\10.0.1.10\profiles" -RenameFolders
 ```
 
-2. Ensure you're logged in: `Connect-AzAccount`
+---
 
-3. Try using `-UseStorageKey` as alternative
+### Use Case 6: In-Place VHD Optimization (Any Platform)
 
-4. Verify storage account firewall allows your IP
+**Scenario**: Converting existing VHD to dynamic VHD format to reclaim space
 
-#### Hyper-V Module Not Found
+**Recommended Script**: Either (depends on storage type)
 
-**Symptom**: `Module Hyper-V not found`
-
-**Solution**:
-
+**Example (Azure Files)**:
 ```powershell
-# Install Hyper-V PowerShell module
-Install-WindowsFeature -Name Hyper-V-PowerShell -IncludeManagementTools
-
-# Verify installation
-Get-Module -ListAvailable -Name Hyper-V
+Connect-AzAccount
+.\Migrate-Containers.ps1 -SourceStorageAccountName "sa1" -SourceShareName "profiles" -OutputType VHD
 ```
 
-**Note**: Requires Windows Server or Windows 10/11 Pro/Enterprise
-
-#### AzCopy Not Found
-
-**Symptom**: `AzCopy not found in PATH`
-
-**Solution**:
-
-1. Download from [https://aka.ms/downloadazcopy](https://aka.ms/downloadazcopy)
-2. Extract to `C:\AzCopy\` (or any location)
-
-3. Add to PATH:
+**Example (Generic UNC)**:
 ```powershell
-$env:Path += ";C:\AzCopy"
-[Environment]::SetEnvironmentVariable("Path", $env:Path, "Machine")
+.\Migrate-Containers-Generic.ps1 -SourceUNCPath "\\server\profiles" -OutputType VHD
 ```
 
-4. Or copy `azcopy.exe` to script directory
+## ⚙️ Common Parameters
 
-#### Slow Performance
+Both scripts share many common parameters:
 
-**Symptom**: Migration taking longer than expected
+| Parameter | Azure Files Script | Generic Script | Description |
+|-----------|-------------------|----------------|-------------|
+| **Source Location** | `-SourceStorageAccountName` + `-SourceShareName` | `-SourceUNCPath` | Source profile location |
+| **Destination Location** | `-DestStorageAccountName` + `-DestShareName` | `-DestinationUNCPath` | Destination location |
+| **Authentication** | `-UseStorageKey` (or Entra ID default) | `-SourceCredential` / `-DestinationCredential` | How to authenticate |
+| **Output Format** | `-OutputType` (VHD\|VHDX) | `-OutputType` (VHD\|VHDX) | Output VHD format |
+| **Folder Renaming** | `-RenameFolders` | `-RenameFolders` | SID_user → user_SID |
+| **Concurrency** | `-UseAzCopy -ConcurrentJobs` | `-ConcurrentProfiles` | Parallel processing |
+| **Logging** | `-LogPath` | `-LogPath` | Log file location |
+| **ACL Config** | `-AdministratorGroupSIDs` / `-UserGroupSIDs` | `-AdministratorGroupSIDs` / `-UserGroupSIDs` | Custom ACL SIDs |
 
-**Solutions**:
+## 📝 Prerequisites
 
-1. Use `-UseAzCopy -ConcurrentJobs 8` for parallel processing
-2. Verify network bandwidth: `Test-NetConnection -ComputerName storageaccount.file.core.windows.net -Port 445`
-3. Check if VM is in same VNet as storage accounts
-4. Reduce `-ConcurrentJobs` if CPU/memory constrained
-5. Verify storage account isn't throttled (check Azure Portal metrics)
+### Both Scripts Require:
 
-#### Out of Disk Space
+- ✅ Windows Server 2019+ or Windows 10/11 Pro/Enterprise
+- ✅ PowerShell 5.1 or later
+- ✅ Hyper-V PowerShell module (`Install-WindowsFeature -Name Hyper-V-PowerShell`)
+- ✅ Administrative privileges (for ACL operations and VHD conversion)
+- ✅ Network connectivity to source and destination (port 445 for SMB)
 
-**Symptom**: Error during AzCopy conversion - insufficient disk space
+### Azure Files Script Additionally Requires:
 
-**Solutions**:
+- ✅ Azure PowerShell module (`Install-Module -Name Az`)
+- ✅ Azure subscription access
+- ✅ Entra ID authentication OR Storage Account Key permissions
+- ✅ Optional: AzCopy for concurrent processing (`https://aka.ms/downloadazcopy`)
 
-1. Free up space in temp directory
-2. Change temp path: `-TempPath "D:\Temp"`
-3. Use direct UNC method instead (no `-UseAzCopy`)
-4. Migrate in smaller batches
+### Generic UNC Script Additionally Requires:
 
-## Best Practices
+- ✅ SMB access to source and destination shares
+- ✅ Optional: PSCredential if not using current Windows identity
+- ✅ Robocopy (built-in with Windows)
 
-### Before Migration
+## 🛡️ Security & Best Practices
 
-1. **Test First**: Run with 5-10 test profiles before full migration
-2. **Verify Permissions**: Confirm RBAC role assignment on both storage accounts
-3. **Check Network**: Ensure Port 445 is open and reachable
+### Before Any Migration:
+
+1. **Test First**: Always test with 2-5 profiles before full migration
+2. **Backup**: Ensure source profiles are backed up
+3. **Document**: Record SIDs used for custom ACLs
 4. **Plan Downtime**: Schedule during maintenance window
-5. **Backup**: Ensure source profiles are backed up (script doesn't delete source)
-6. **Document SIDs**: If using custom admin/user groups, document SIDs used
+5. **Verify Access**: Confirm read/write permissions to all shares
 
-### During Migration
+### Authentication Best Practices:
 
-1. **Monitor Progress**: Watch console output and log files
-2. **Check Azure Portal**: Monitor storage account metrics
-3. **Verify Network**: Ensure stable network connection
-4. **Resource Monitoring**: Check CPU, memory, and disk usage on migration VM
-5. **Spot Check**: Periodically verify migrated profiles are accessible
+**Azure Files Script:**
+- ✅ Prefer Entra ID (RBAC) over Storage Keys
+- ✅ Assign "Storage File Data SMB Share Elevated Contributor" role
+- ✅ Use `Connect-AzAccount` before running script
 
-### After Migration
+**Generic UNC Script:**
+- ✅ Use current Windows identity when possible
+- ✅ Use dedicated service account with minimal permissions
+- ✅ Secure PSCredential objects (don't store plaintext passwords)
 
-1. **Verify ACLs**: Spot check permissions on migrated profiles
-2. **Test Access**: Have test users log in to verify profiles work
-3. **Review Logs**: Check for any warnings or errors
-4. **Update FSLogix**: Point FSLogix to new storage location
-5. **Monitor**: Watch for user login issues
-6. **Cleanup**: Remove old profiles after confirming migration success (wait 30+ days)
+### After Migration:
 
-## FSLogix Configuration Updates
+1. **Verify Profiles**: Spot check that profiles load correctly
+2. **Update FSLogix Settings**: Point FSLogix registry to new location
+3. **Test User Logins**: Have test users verify profile functionality
+4. **Monitor**: Watch for issues in FSLogix logs
+5. **Cleanup**: Keep source profiles for 30+ days before deletion
 
-After migrating profiles, you must update FSLogix registry settings to reflect the new storage location and profile format. These settings are typically managed via Group Policy or registry.
+## 📖 Documentation Links
 
-### Required Registry Settings
+- **Azure Files Script**: [README-AzureFiles.md](README-AzureFiles.md) - Full documentation for Azure Files migrations
+- **Generic UNC Script**: [README-Generic.md](README-Generic.md) - Full documentation for generic UNC path migrations
+- **FSLogix Documentation**: [Microsoft Learn](https://learn.microsoft.com/en-us/fslogix/)
+- **Azure Files**: [Azure Files Documentation](https://learn.microsoft.com/en-us/azure/storage/files/)
+- **Azure NetApp Files**: [ANF Documentation](https://learn.microsoft.com/en-us/azure/azure-netapp-files/)
 
-FSLogix settings are located at:
+## ❓ FAQ
 
-- **Registry Path**: `HKLM\SOFTWARE\FSLogix\Profiles`
-- **Group Policy**: Computer Configuration → Policies → Administrative Templates → FSLogix
+**Q: Can I use the Azure Files script for Azure NetApp Files?**  
+A: No. Azure NetApp Files is accessed via a standard UNC path and doesn't use the Azure Storage API. Use the Generic UNC script instead.
 
-### Settings That Must Be Updated
+**Q: Which script is faster?**  
+A: Performance depends more on your network and storage than the script choice. Both support parallelism. Azure Files with AzCopy can be faster for Azure Files to Azure Files migrations. Generic with Robocopy is optimized for any SMB share.
 
-#### 1. VHDLocations (Critical)
+**Q: Do these scripts delete source profiles?**  
+A: No. Source profiles are never deleted (except in-place VHD optimization, where originals are backed up first).
 
-**When to Update**: Always update if migrating to a different storage account or share name.
+**Q: Can I migrate from Azure Files to a file server?**  
+A: Yes, use the Generic UNC script. Azure Files can be accessed as a UNC path.
 
-**Registry Key**: `VHDLocations`  
-**Type**: `REG_MULTI_SZ` or `REG_SZ`  
-**Purpose**: Specifies the path(s) where FSLogix profile containers are stored.
+**Q: What if I need to migrate across domains?**  
+A: Use the Generic UNC script with `-SourceCredential` and `-DestinationCredential` parameters to specify credentials for each domain.
 
-**Before Migration Example:**
+**Q: How do I handle large migrations (500+ profiles)?**  
+A: Use concurrent processing (`-UseAzCopy -ConcurrentJobs 8` for Azure Files, or `-ConcurrentProfiles 8` for Generic). Consider splitting into batches if system resources are limited.
 
-```
-\\oldstorageaccount.file.core.windows.net\profiles
-```
+**Q: Can I change folder naming during migration?**  
+A: Yes, both scripts support `-RenameFolders` to convert between SID_username and username_SID formats.
 
-**After Migration Example:**
+**Q: What happens if the script is interrupted?**  
+A: The script doesn't support resume. Re-run it, and it will process all profiles again (already migrated profiles will be overwritten). Consider migrating in smaller batches.
 
-```
-\\newstorageaccount.file.core.windows.net\profiles
-```
+## 🐛 Troubleshooting
 
-**PowerShell Update:**
+### Common Issues Across Both Scripts:
 
-```powershell
-# Single location
-Set-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" `
-    -Name "VHDLocations" `
-    -Value "\\newstorageaccount.file.core.windows.net\profiles" `
-    -Type MultiString
+1. **"Hyper-V module not found"**
+   - Install: `Install-WindowsFeature -Name Hyper-V-PowerShell`
+   - Requires restart
 
-# Multiple locations (for Cloud Cache or redundancy)
-$locations = @(
-    "\\newstorageaccount.file.core.windows.net\profiles",
-    "type=smb,connectionString=\\backupsa.file.core.windows.net\profiles"
-)
-Set-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" `
-    -Name "VHDLocations" `
-    -Value $locations `
-    -Type MultiString
-```
+2. **"Access Denied" errors**
+   - Run PowerShell as Administrator
+   - Verify share permissions
+   - Check NTFS permissions
+   - For Azure Files: Verify RBAC role or storage key access
 
-**Group Policy**: FSLogix → Profile Containers → Container and Directory Naming → VHD Location(s)
+3. **Slow performance**
+   - Increase concurrency settings
+   - Check network bandwidth
+   - Verify storage isn't throttled
+   - Reduce concurrency if CPU/memory limited
 
----
+4. **Out of disk space**
+   - Free up space in temp directory
+   - Change `-TempPath` to larger drive
+   - Migrate in smaller batches
 
-#### 2. VolumeType (If Changed to VHDX)
+### Script-Specific Issues:
 
-**When to Update**: If you migrated from VHD to VHDX format (default behavior of this script).
+**Azure Files Script:**
+- **"Storage account not found"**: Verify account name, ensure `Connect-AzAccount` was run
+- **"AzCopy not authenticated"**: Run `azcopy login` before script
+- **Storage endpoint errors**: May be using Azure Government/China, script will auto-detect
 
-**Registry Key**: `VolumeType`  
-**Type**: `REG_SZ`  
-**Purpose**: Specifies the container file format.
+**Generic UNC Script:**
+- **"Cannot access UNC path"**: Verify network connectivity, DNS resolution, firewall (port 445)
+- **Authentication failures**: Use `-SourceCredential` / `-DestinationCredential` with valid credentials
+- **Robocopy errors**: Check `Robocopy_*.log` files in LogPath for details
 
-**Values:**
-
-- `VHD` = Virtual Hard Disk format (legacy, 2TB max)
-- `VHDX` = Hyper-V Virtual Hard Disk format (recommended, 64TB max)
-
-**PowerShell Update:**
-
-```powershell
-Set-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" `
-    -Name "VolumeType" `
-    -Value "VHDX" `
-    -Type String
-```
-
-**Group Policy**: FSLogix → Profile Containers → Container and Directory Naming → Virtual Disk Type
-
-**Note**: This setting affects **new** profiles only. Existing profiles remain in their current format unless migrated.
-
----
-
-#### 3. VHDType (Dynamic vs Fixed)
-
-**When to Update**: If you changed disk allocation type during migration (this script creates dynamic disks).
-
-**Registry Key**: `IsDynamic`  
-**Type**: `REG_DWORD`  
-**Purpose**: Determines if new containers are dynamically expanding or fixed size.
-
-**Values:**
-
-- `0` = Fixed size (allocates full size immediately)
-- `1` = Dynamic expansion (grows as needed, recommended)
-
-**PowerShell Update:**
-
-```powershell
-# Set to dynamic (recommended for migrated profiles)
-Set-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" `
-    -Name "IsDynamic" `
-    -Value 1 `
-    -Type DWord
-```
-
-**Group Policy**: FSLogix → Profile Containers → Container and Directory Naming → Is Dynamic (VHD)
-
-**Important**: This script converts profiles to **dynamic** format. Set this to `1` to ensure new profiles match.
-
----
-
-### Optional Settings to Review
-
-#### SizeInMBs (Profile Size Limit)
-
-**Registry Key**: `SizeInMBs`  
-**Type**: `REG_DWORD`  
-**Default**: `30000` (30GB)
-
-If migrating to VHDX (which supports larger sizes), consider increasing:
-
-```powershell
-# Increase max profile size to 100GB
-Set-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" `
-    -Name "SizeInMBs" `
-    -Value 102400 `
-    -Type DWord
-```
-
-#### FlipFlopProfileDirectoryName
-
-**Registry Key**: `FlipFlopProfileDirectoryName`  
-**Type**: `REG_DWORD`  
-**Values**: `0` = SID_username | `1` = username_SID
-
-If you used `-RenameFolders` parameter to change folder naming convention:
-
-```powershell
-# If migrated from SID_username to username_SID
-Set-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" `
-    -Name "FlipFlopProfileDirectoryName" `
-    -Value 1 `
-    -Type DWord
-```
-
-### Deploying Changes via Group Policy
-
-**Recommended Method**: Use Group Policy for centralized management.
-
-1. **Open Group Policy Management Console (GPMC)**
-
-2. **Navigate to FSLogix Settings**:
-
-   ```
-   Computer Configuration → Policies → Administrative Templates → FSLogix → Profile Containers
-   ```
-
-3. **Update Required Policies**:
-   - **Enabled**: Enable Profile Container
-   - **VHD Location(s)**: New storage path(s)
-   - **Virtual Disk Type**: VHDX
-   - **Is Dynamic (VHD)**: Enabled
-
-4. **Force GPO Update** (Optional):
-
-   ```powershell
-   gpupdate /force
-   ```
-
-### Verification Steps
-
-After updating FSLogix settings:
-
-1. **Verify Registry Values**:
-
-    ```powershell
-    Get-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" | Format-List
-    ```
-
-1. **Test User Login**:
-   - Have a test user log in to a session host
-   - Verify profile loads from new location
-   - Check Event Viewer → Applications and Services Logs → FSLogix-Apps/Operational
-
-2. **Monitor Profile Access**:
-
-    ```powershell
-    # Check if new location is accessible
-    Test-Path "\\newstorageaccount.file.core.windows.net\profiles"
-
-    # Verify specific user profile
-    Test-Path "\\newstorageaccount.file.core.windows.net\profiles\username_S-1-5-21-xxx\Profile_username.vhdx"
-    ```
-
-4. **Review FSLogix Logs**:
-
-   - Location: `C:\ProgramData\FSLogix\Logs`
-   - Look for: `Profile` logs
-   - Confirm: Successful profile mounting from new location
-
-### Common Configuration Mistakes
-
-❌ **Mistake**: Forgetting to update VHDLocations  
-✅ **Result**: Users get new blank profiles instead of migrated ones
-
-❌ **Mistake**: Setting VolumeType=VHD when profiles are VHDX  
-✅ **Result**: FSLogix can still mount existing VHDX, but new profiles would be VHD
-
-❌ **Mistake**: Not updating Cloud Cache locations  
-✅ **Result**: Cloud Cache tries to sync to old location
-
-❌ **Mistake**: Mismatched FlipFlopProfileDirectoryName setting  
-✅ **Result**: FSLogix can't find existing profiles due to naming mismatch
-
-### Cloud Cache Considerations
-
-If using FSLogix Cloud Cache, update **both** locations:
-
-```powershell
-$ccLocations = @(
-    "type=smb,connectionString=\\newprimarysa.file.core.windows.net\profiles",
-    "type=smb,connectionString=\\newsecondarysa.file.core.windows.net\profiles"
-)
-Set-ItemProperty -Path "HKLM:\SOFTWARE\FSLogix\Profiles" `
-    -Name "CCDLocations" `
-    -Value $ccLocations `
-    -Type MultiString
-```
-
-### Reference Links
-
-- [FSLogix Configuration Reference](https://learn.microsoft.com/en-us/fslogix/reference-configuration-settings)
-- [FSLogix Profile Container Settings](https://learn.microsoft.com/en-us/fslogix/profile-container-configuration-reference)
-- [FSLogix Group Policy Templates](https://aka.ms/fslogix/download)
-- [Troubleshooting FSLogix Profiles](https://learn.microsoft.com/en-us/fslogix/troubleshooting-profiles)
-
-## Security Considerations
-
-### Authentication
-
-- **Entra ID**: Most secure, uses RBAC, supports MFA, audit logs
-- **Storage Keys**: Less secure, shared secret, rotate regularly
-
-### Data in Transit
-
-- SMB 3.0 with encryption enabled by default on Azure Files
-- HTTPS for management operations
-- Consider VPN or Private Endpoint for additional security
-
-### Permissions
-
-- Script requires elevated privileges for ACL operations
-- Run from secure jump box or administrative workstation
-- Use Just-In-Time (JIT) access if available
-- Audit who has access to run migrations
-
-### Logging
-
-- Logs contain profile folder names (may include usernames)
-- Store logs securely
-- Review access to log directories
-- Consider log retention policies
-
-## Limitations
-
-- **Windows Only**: Requires Windows OS with Hyper-V PowerShell module
-- **VHD/VHDX Only**: Only processes VHD/VHDX files (not other profile types)
-- **Sequential ACL Setting**: ACLs set sequentially even with concurrent migrations
-- **No Resume**: Failed profiles must be re-migrated (no checkpoint/resume)
-- **Same VHDX Version**: Output VHDX version matches Convert-VHD defaults
-- **No Dedupe**: Does not deduplicate data between profiles
-
-## FAQ
-
-**Q: Will source profiles be deleted?**  
-A: No. When migrating between storage accounts, source profiles remain untouched. For in-place VHD optimization, originals are backed up as `.vhd.backup` and deleted only after successful conversion.
-
-**Q: Can I pause and resume the migration?**  
-A: No. The script processes profiles sequentially or in parallel batches. If interrupted, you can re-run the script and it will process all profiles again (including already migrated ones).
-
-**Q: What happens if a profile fails to migrate?**  
-A: The script logs the error and continues with the next profile. Check the log file and CSV results for details. Failed profiles can be re-migrated individually or in a second pass.
-
-**Q: Can I migrate from on-premises to Azure Files?**  
-A: Yes, if the on-premises file server is accessible via UNC path and you have appropriate permissions. Performance will depend on your internet connection.
-
-**Q: Does this work with FSLogix Cloud Cache?**  
-A: Yes, the script can migrate both local and cloud cache VHD/VHDX files. Ensure both primary and cloud cache locations are migrated if using redirections.
-
-**Q: What's the difference between VHD and VHDX output?**  
-A: VHDX supports larger sizes (64TB vs 2TB), better corruption resistance, and improved performance. Recommended for new deployments. VHD may be needed for legacy compatibility.
-
-**Q: Can I run multiple instances of the script simultaneously?**  
-A: Not recommended. Both instances would process the same profiles, wasting resources and potentially causing conflicts. Use `-UseAzCopy -ConcurrentJobs` instead for parallelism.
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/shawntmeyer/FSLogix/issues)
-- **Documentation**: [FSLogix Docs](https://learn.microsoft.com/en-us/fslogix/)
-- **Azure Files**: [Azure Files Docs](https://learn.microsoft.com/en-us/azure/storage/files/)
-
-## Contributing
+## 🤝 Contributing
 
 Contributions are welcome! Please:
+
 1. Fork the repository
-2. Create a feature branch
-3. Test thoroughly
-4. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Test thoroughly with multiple scenarios
+4. Update relevant documentation
+5. Submit a pull request
 
-## License
+## 📄 License
 
-This script is provided as-is under the MIT License. See LICENSE file for details.
+This project is licensed under the MIT License - see the LICENSE file for details.
 
-## Changelog
+## ⚠️ Disclaimer
 
-### Version 1.0 (2026-01-30)
-
-- Initial release
-- VHD to VHDX conversion
-- VHD to dynamic VHD optimization
-- Dual authentication (Entra ID / Storage Keys)
-- Direct UNC and AzCopy methods
-- Concurrent processing support
-- ACL management with Creator Owner
-- Folder renaming (SID_username ↔ username_SID)
-- Comprehensive logging and reporting
+**This sample code is provided for illustration purposes only and is not intended to be used in a production environment without thorough testing.** The code is provided "AS IS" without warranty of any kind, either expressed or implied, including but not limited to the implied warranties of merchantability and/or fitness for a particular purpose. Always test in a non-production environment before deploying to production systems.
 
 ---
 
-**Last Updated**: January 30, 2026  
-**Tested On**: Windows Server 2019/2022, Windows 10/11 Pro/Enterprise  
-**PowerShell Version**: 5.1, 7.x
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/shawntmeyer/FSLogix/issues)
+- **Pull Requests**: [GitHub PRs](https://github.com/shawntmeyer/FSLogix/pulls)
+- **Documentation**: [FSLogix Microsoft Learn](https://learn.microsoft.com/en-us/fslogix/)
+
+---
+
+**Last Updated**: April 3, 2026  
+**Repository**: [https://github.com/shawntmeyer/FSLogix](https://github.com/shawntmeyer/FSLogix)  
+**Maintainer**: Shawn Meyer
