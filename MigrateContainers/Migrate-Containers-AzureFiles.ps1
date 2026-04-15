@@ -446,6 +446,9 @@ function Get-FSLogixContainers {
     }
     catch {
         Write-Log "Error enumerating profiles: $_" -Level ERROR
+        if ($driveLetter -and (Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue)) {
+            Remove-PSDrive -Name $driveLetter -Force -ErrorAction SilentlyContinue
+        }
         throw
     }
 }
