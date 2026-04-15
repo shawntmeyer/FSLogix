@@ -295,34 +295,20 @@ if (!(Test-Path $TempPath)) {
 
 $logFile = Join-Path $LogPath "FSLogixMigration_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
+# Import common module
+$modulePath = Join-Path $PSScriptRoot "FSLogixMigrationCommon.psm1"
+if (!(Test-Path $modulePath)) {
+    Write-Host "ERROR: Common module not found: $modulePath" -ForegroundColor Red
+    Write-Host "Please ensure FSLogixMigrationCommon.psm1 is in the same directory as this script." -ForegroundColor Yellow
+    exit 1
+}
+
+Import-Module $modulePath -Force
+Set-LogFilePath -Path $logFile
+
 #endregion
 
 #region Functions
-
-function Write-Log {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Message,
-        
-        [Parameter(Mandatory = $false)]
-        [ValidateSet('INFO', 'WARNING', 'ERROR', 'SUCCESS')]
-        [string]$Level = 'INFO'
-    )
-    
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logMessage = "[$timestamp] [$Level] $Message"
-    
-    # Write to console with color
-    switch ($Level) {
-        'ERROR'   { Write-Host $logMessage -ForegroundColor Red }
-        'WARNING' { Write-Host $logMessage -ForegroundColor Yellow }
-        'SUCCESS' { Write-Host $logMessage -ForegroundColor Green }
-        default   { Write-Host $logMessage }
-    }
-    
-    # Write to file
-    Add-Content -Path $logFile -Value $logMessage
-}
 
 function Get-StorageAccountKey {
     param(
@@ -374,24 +360,6 @@ function Test-AzCopy {
     }
 }
 
-function Test-HyperVModule {
-    try {
-        if (Get-Module -ListAvailable -Name Hyper-V) {
-            Import-Module Hyper-V -ErrorAction Stop
-            Write-Log "Hyper-V module loaded successfully" -Level SUCCESS
-            return $true
-        }
-        else {
-            Write-Log "Hyper-V module not available. Install with: Install-WindowsFeature -Name Hyper-V-PowerShell" -Level ERROR
-            return $false
-        }
-    }
-    catch {
-        Write-Log "Error loading Hyper-V module: $_" -Level ERROR
-        return $false
-    }
-}
-
 function Get-StorageEndpointSuffix {
     try {
         # Try to get from Azure context
@@ -427,7 +395,7 @@ function Get-FSLogixContainers {
         # Map drive temporarily using Entra ID authentication
         $driveLetter = Get-AvailableDriveLetter
         
-        New-PSDrive -Name $driveLetter -PSProvider FileSystem -Root $sourceUNC -ErrorAction Stop | Out-Null
+        New-PSDrive -Name $driveLetter -PSProvider FileSystem -Root $sourceUNC -Scope Global -ErrorAction Stop | Out-Null
         Write-Log "Mapped drive ${driveLetter}: to $sourceUNC (using Entra ID authentication)" -Level SUCCESS
         
         # Get all profile folders
@@ -480,48 +448,6 @@ function Get-FSLogixContainers {
         Write-Log "Error enumerating profiles: $_" -Level ERROR
         throw
     }
-}
-
-function Get-AvailableDriveLetter {
-    $used = Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Name
-    foreach ($letter in 90..65) {
-        $drive = [char]$letter
-        if ($drive -notin $used) {
-            return $drive
-        }
-    }
-    throw "No available drive letters"
-}
-
-function Convert-FolderName {
-    param([string]$FolderName)
-    
-    # Convert from SID_username to username_SID
-    if ($FolderName -match '^(S-[0-9-]+)_(.+)$') {
-        $sid = $matches[1]
-        $username = $matches[2]
-        return "${username}_${sid}"
-    }
-    
-    # Already in username_SID format or unknown format
-    return $FolderName
-}
-
-function Get-SIDFromFolderName {
-    param([string]$FolderName)
-    
-    # Extract SID from SID_username format
-    if ($FolderName -match '^(S-[0-9-]+)_') {
-        return $matches[1]
-    }
-    
-    # Extract SID from username_SID format
-    if ($FolderName -match '_(S-[0-9-]+)$') {
-        return $matches[1]
-    }
-    
-    Write-Log "Could not extract SID from folder name: $FolderName" -Level WARNING
-    return $null
 }
 
 function Invoke-ConcurrentMigration {
@@ -726,177 +652,6 @@ function Copy-WithAzCopy {
     }
     catch {
         Write-Log "AzCopy transfer failed: $_" -Level ERROR
-        return $false
-    }
-}
-
-function Set-ShareRootACL {
-    param(
-        [string]$ShareRootPath,
-        [string[]]$AdminSIDs,
-        [string[]]$UserSIDs
-    )
-    
-    try {
-        Write-Log "Setting ACLs on share root: $ShareRootPath"
-        
-        # Well-known SIDs
-        $systemSID = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')
-        $creatorOwnerSID = New-Object System.Security.Principal.SecurityIdentifier('S-1-3-0')
-        $authenticatedUsersSID = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-11')
-        
-        # Get current ACL
-        $acl = Get-Acl -Path $ShareRootPath
-        
-        # Disable inheritance and remove inherited rules
-        $acl.SetAccessRuleProtection($true, $false)
-        
-        # Remove all existing access rules
-        $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
-        
-        # Add SYSTEM - Full Control (This folder, subfolders and files)
-        $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $systemSID,
-            [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
-            [System.Security.AccessControl.PropagationFlags]::None,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-        $acl.AddAccessRule($systemRule)
-        Write-Log "Added SYSTEM with Full Control"
-        
-        # Add Administrators group(s) - Full Control (This folder, subfolders and files)
-        foreach ($adminSID in $AdminSIDs) {
-            try {
-                $adminAccount = New-Object System.Security.Principal.SecurityIdentifier($adminSID)
-                $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                    $adminAccount,
-                    [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
-                    [System.Security.AccessControl.PropagationFlags]::None,
-                    [System.Security.AccessControl.AccessControlType]::Allow
-                )
-                $acl.AddAccessRule($adminRule)
-                Write-Log "Added Administrator SID $adminSID with Full Control"
-            }
-            catch {
-                Write-Log "Failed to add admin SID $adminSID : $_" -Level WARNING
-            }
-        }
-        
-        # Add Creator Owner - Full Control (Subfolders and files only)
-        $creatorOwnerRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $creatorOwnerSID,
-            [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
-            [System.Security.AccessControl.PropagationFlags]::InheritOnly,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-        $acl.AddAccessRule($creatorOwnerRule)
-        Write-Log "Added Creator Owner with Full Control (subfolders and files only)"
-        
-        # Add User group(s) or Authenticated Users - Modify (This folder only)
-        if ($UserSIDs.Count -gt 0) {
-            foreach ($userGroupSID in $UserSIDs) {
-                try {
-                    $userGroupAccount = New-Object System.Security.Principal.SecurityIdentifier($userGroupSID)
-                    $userGroupRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                        $userGroupAccount,
-                        [System.Security.AccessControl.FileSystemRights]::Modify,
-                        [System.Security.AccessControl.InheritanceFlags]::None,
-                        [System.Security.AccessControl.PropagationFlags]::None,
-                        [System.Security.AccessControl.AccessControlType]::Allow
-                    )
-                    $acl.AddAccessRule($userGroupRule)
-                    Write-Log "Added User Group SID $userGroupSID with Modify (this folder only)"
-                }
-                catch {
-                    Write-Log "Failed to add user group SID $userGroupSID : $_" -Level WARNING
-                }
-            }
-        }
-        else {
-            # Default to Authenticated Users
-            $authenticatedUsersRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                $authenticatedUsersSID,
-                [System.Security.AccessControl.FileSystemRights]::Modify,
-                [System.Security.AccessControl.InheritanceFlags]::None,
-                [System.Security.AccessControl.PropagationFlags]::None,
-                [System.Security.AccessControl.AccessControlType]::Allow
-            )
-            $acl.AddAccessRule($authenticatedUsersRule)
-            Write-Log "Added Authenticated Users with Modify (this folder only)"
-        }
-        
-        # Apply ACL to share root
-        Set-Acl -Path $ShareRootPath -AclObject $acl
-        Write-Log "Share root ACLs applied successfully" -Level SUCCESS
-        
-        return $true
-    }
-    catch {
-        Write-Log "Error setting share root ACLs: $_" -Level ERROR
-        return $false
-    }
-}
-
-function Set-ProfileACL {
-    param(
-        [string]$ProfilePath,
-        [string]$VHDXPath,
-        [string]$UserSID
-    )
-    
-    try {
-        Write-Log "Setting ownership and enabling inheritance for: $ProfilePath"
-        
-        if ([string]::IsNullOrEmpty($UserSID)) {
-            Write-Log "No user SID provided, skipping ACL configuration" -Level WARNING
-            return $false
-        }
-        
-        # Verify SID is valid
-        try {
-            $userAccount = New-Object System.Security.Principal.SecurityIdentifier($UserSID)
-        }
-        catch {
-            Write-Log "Invalid user SID: $UserSID - $_" -Level ERROR
-            return $false
-        }
-        
-        # Set ownership on profile folder
-        Write-Log "Setting owner to $UserSID on folder: $ProfilePath"
-        $acl = Get-Acl -Path $ProfilePath
-        $acl.SetOwner($userAccount)
-        Set-Acl -Path $ProfilePath -AclObject $acl
-        
-        # Set ownership on VHDX file if it exists
-        if (Test-Path $VHDXPath) {
-            Write-Log "Setting owner to $UserSID on VHDX: $VHDXPath"
-            $vhdxAcl = Get-Acl -Path $VHDXPath
-            $vhdxAcl.SetOwner($userAccount)
-            Set-Acl -Path $VHDXPath -AclObject $vhdxAcl
-        }
-        
-        # Remove all explicit permissions and enable inheritance from parent
-        # (Creator Owner permissions will apply to this user now)
-        $acl = Get-Acl -Path $ProfilePath
-        
-        # Remove all explicit access rules
-        $acl.Access | Where-Object { -not $_.IsInherited } | ForEach-Object { 
-            $acl.RemoveAccessRule($_) | Out-Null 
-        }
-        
-        # Enable inheritance (false = not protected, false = don't preserve existing rules)
-        $acl.SetAccessRuleProtection($false, $false)
-        Set-Acl -Path $ProfilePath -AclObject $acl
-        
-        Write-Log "Explicit permissions removed, inheritance enabled. Creator Owner permissions now apply." -Level SUCCESS
-        
-        return $true
-    }
-    catch {
-        Write-Log "Error setting ownership/inheritance: $_" -Level ERROR
         return $false
     }
 }
@@ -1227,11 +982,11 @@ try {
     if ($UseStorageKey) {
         $secureSourceKey = ConvertTo-SecureString -String $SourceStorageKey -AsPlainText -Force
         $sourceCredential = New-Object System.Management.Automation.PSCredential("Azure\$SourceStorageAccountName", $secureSourceKey)
-        New-PSDrive -Name $sourceDrive -PSProvider FileSystem -Root $sourceUNC -Credential $sourceCredential -ErrorAction Stop | Out-Null
+        New-PSDrive -Name $sourceDrive -PSProvider FileSystem -Root $sourceUNC -Credential $sourceCredential -Scope Global -ErrorAction Stop | Out-Null
         Write-Log "Source mapped to ${sourceDrive}: ($sourceUNC) using storage account key" -Level SUCCESS
     }
     else {
-        New-PSDrive -Name $sourceDrive -PSProvider FileSystem -Root $sourceUNC -ErrorAction Stop | Out-Null
+        New-PSDrive -Name $sourceDrive -PSProvider FileSystem -Root $sourceUNC -Scope Global -ErrorAction Stop | Out-Null
         Write-Log "Source mapped to ${sourceDrive}: ($sourceUNC) using Entra ID" -Level SUCCESS
     }
 }
@@ -1254,11 +1009,11 @@ else {
         if ($UseStorageKey) {
             $secureDestKey = ConvertTo-SecureString -String $DestStorageKey -AsPlainText -Force
             $destCredential = New-Object System.Management.Automation.PSCredential("Azure\$DestStorageAccountName", $secureDestKey)
-            New-PSDrive -Name $destDrive -PSProvider FileSystem -Root $destUNC -Credential $destCredential -ErrorAction Stop | Out-Null
+            New-PSDrive -Name $destDrive -PSProvider FileSystem -Root $destUNC -Credential $destCredential -Scope Global -ErrorAction Stop | Out-Null
             Write-Log "Destination mapped to ${destDrive}: ($destUNC) using storage account key" -Level SUCCESS
         }
         else {
-            New-PSDrive -Name $destDrive -PSProvider FileSystem -Root $destUNC -ErrorAction Stop | Out-Null
+            New-PSDrive -Name $destDrive -PSProvider FileSystem -Root $destUNC -Scope Global -ErrorAction Stop | Out-Null
             Write-Log "Destination mapped to ${destDrive}: ($destUNC) using Entra ID" -Level SUCCESS
         }
     }
