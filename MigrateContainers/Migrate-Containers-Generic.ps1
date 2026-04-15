@@ -279,7 +279,7 @@ function Get-FSLogixContainers {
             Name = $driveLetter
             PSProvider = 'FileSystem'
             Root = $UNCPath
-            Scope = 'Script'
+            Scope = 'Global'
             ErrorAction = 'Stop'
         }
         
@@ -885,7 +885,7 @@ try {
         Name = $sourceDrive
         PSProvider = 'FileSystem'
         Root = $SourceUNCPath
-        Scope = 'Script'
+        Scope = 'Global'
         ErrorAction = 'Stop'
     }
     
@@ -916,7 +916,7 @@ else {
             Name = $destDrive
             PSProvider = 'FileSystem'
             Root = $DestinationUNCPath
-            Scope = 'Script'
+            Scope = 'Global'
             ErrorAction = 'Stop'
         }
         
