@@ -196,6 +196,10 @@ function Set-ShareRootACL {
         $creatorOwnerSID = New-Object System.Security.Principal.SecurityIdentifier('S-1-3-0')
         $authenticatedUsersSID = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-11')
         
+        # Pre-compute InheritanceFlags combinations to avoid PowerShell parsing issues
+        # with -bor inside multi-line New-Object constructor arguments
+        $inheritAllFlags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+        
         # Get current ACL
         $acl = Get-Acl -Path $ShareRootPath
         
@@ -209,7 +213,7 @@ function Set-ShareRootACL {
         $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
             $systemSID,
             [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            $inheritAllFlags,
             [System.Security.AccessControl.PropagationFlags]::None,
             [System.Security.AccessControl.AccessControlType]::Allow
         )
@@ -223,7 +227,7 @@ function Set-ShareRootACL {
                 $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
                     $adminAccount,
                     [System.Security.AccessControl.FileSystemRights]::FullControl,
-                    [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+                    $inheritAllFlags,
                     [System.Security.AccessControl.PropagationFlags]::None,
                     [System.Security.AccessControl.AccessControlType]::Allow
                 )
@@ -239,7 +243,7 @@ function Set-ShareRootACL {
         $creatorOwnerRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
             $creatorOwnerSID,
             [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            $inheritAllFlags,
             [System.Security.AccessControl.PropagationFlags]::InheritOnly,
             [System.Security.AccessControl.AccessControlType]::Allow
         )
