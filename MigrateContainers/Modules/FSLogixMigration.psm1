@@ -1,18 +1,20 @@
 <#
 .SYNOPSIS
-    Common functions module for FSLogix profile container migration scripts.
+    Utility function library for FSLogix profile container migration scripts.
 
 .DESCRIPTION
-    This module contains shared functions used by both Azure Files and Generic UNC path
-    migration scripts. Functions include logging, folder naming, SID extraction, 
-    ACL management, and VHD conversion utilities.
+    Shared utility functions used by the FSLogix migration script suite:
+    Migrate-Containers-AzureFiles.ps1 and Migrate-Containers-Generic.ps1.
+    Covers logging, drive letter allocation, folder naming, SID extraction,
+    ACL management, VHD conversion, and per-profile migration logic.
 
 .NOTES
-    File Name      : FSLogixMigrationCommon.psm1
+    File Name      : FSLogixMigration.psm1
+    Location       : Modules\FSLogixMigration.psm1
     Author         : GitHub Copilot
     Prerequisite   : PowerShell 5.1+
-    Version        : 1.0
-    Date           : 2026-04-03
+    Version        : 2.0
+    Date           : 2026-04-26
 #>
 
 # Module-level variable for log file path (set by calling script)
@@ -372,6 +374,186 @@ function Set-ProfileACL {
     }
 }
 
+function Migrate-FSLogixContainer {
+    <#
+    .SYNOPSIS
+        Migrates a single FSLogix profile container to its destination.
+
+    .DESCRIPTION
+        Handles VHD/VHDX conversion (fixed → dynamic, VHD → VHDX) and copying for one
+        profile folder. Designed to be called from both sequential and concurrent (runspace)
+        contexts. All file transfers use Copy-Item directly — no Robocopy dependency.
+
+    .PARAMETER Container
+        PSCustomObject describing the profile: FolderName, VHDName, VHDPath, VHDSize,
+        IsDynamic, VhdFormat (as returned by Get-FSLogixContainers).
+
+    .PARAMETER SourceDrive
+        Drive letter (without colon) mapped to the source UNC share.
+
+    .PARAMETER DestDrive
+        Drive letter (without colon) mapped to the destination UNC share.
+
+    .PARAMETER Rename
+        When $true, renames the folder from SID_username to username_SID format.
+
+    .PARAMETER TempPath
+        Local directory for temporary VHD conversion files.
+
+    .PARAMETER OutputType
+        'VHD' or 'VHDX' — the desired output container format.
+
+    .PARAMETER SameLocation
+        $true when source and destination are the same UNC path (in-place conversion).
+
+    .PARAMETER ForceConversion
+        $true to force conversion even if the disk is already dynamic and the correct format.
+
+    .OUTPUTS
+        Hashtable with keys: Success, SourceFolder, DestFolder, SourceVHD, DestOutput,
+        OriginalSize, ConvertedSize, Skipped, Error.
+    #>
+    param(
+        [PSCustomObject]$Container,
+        [string]$SourceDrive,
+        [string]$DestDrive,
+        [bool]$Rename,
+        [string]$TempPath,
+        [string]$OutputType,
+        [bool]$SameLocation,
+        [bool]$ForceConversion
+    )
+
+    $containerTempPath = $null
+
+    try {
+        Write-Log "[$($Container.FolderName)] Starting migration"
+
+        # Resolve destination folder name (optionally rename SID_user → user_SID)
+        $destFolderName = if ($Rename) { Convert-FolderName $Container.FolderName } else { $Container.FolderName }
+
+        $sourceFolderPath = Join-Path "${SourceDrive}:\" $Container.FolderName
+        $destFolderPath   = Join-Path "${DestDrive}:\"   $destFolderName
+
+        if (!(Test-Path $destFolderPath)) {
+            New-Item -Path $destFolderPath -ItemType Directory -Force | Out-Null
+            Write-Log "[$($Container.FolderName)] Created destination folder: $destFolderPath"
+        }
+
+        $sourceVHDPath  = Join-Path $sourceFolderPath $Container.VHDName
+        $outputExtension = if ($OutputType -eq 'VHDX') { '.vhdx' } else { '.vhd' }
+        $outputFileName  = [System.IO.Path]::ChangeExtension($Container.VHDName, $outputExtension)
+        $destVHDPath     = Join-Path $destFolderPath $outputFileName
+
+        # Decide whether conversion is needed
+        $needsConversion  = $false
+        $conversionReason = ''
+
+        if ($ForceConversion) {
+            $needsConversion  = $true
+            $conversionReason = 'Force parameter specified'
+        }
+        elseif (!$Container.IsDynamic) {
+            $needsConversion  = $true
+            $conversionReason = 'Source is fixed disk'
+        }
+        elseif ($Container.VhdFormat -ne $OutputType) {
+            $needsConversion  = $true
+            $conversionReason = "Format conversion ($($Container.VhdFormat) -> $OutputType)"
+        }
+        elseif ($SameLocation) {
+            # Already dynamic + correct format + same location → nothing to do
+            Write-Log "[$($Container.FolderName)] Skipping - already dynamic $($Container.VhdFormat) at destination" -Level SUCCESS
+            return @{
+                Success       = $true
+                SourceFolder  = $Container.FolderName
+                DestFolder    = $destFolderName
+                SourceVHD     = $Container.VHDName
+                DestOutput    = $Container.VHDName
+                OriginalSize  = $Container.VHDSize
+                ConvertedSize = $Container.VHDSize
+                Skipped       = $true
+                Error         = $null
+            }
+        }
+
+        $convertedSize = $null
+
+        if ($needsConversion) {
+            Write-Log "[$($Container.FolderName)] Conversion needed: $conversionReason"
+
+            # Use a unique temp subfolder so concurrent jobs never collide
+            $containerTempPath = Join-Path $TempPath "$($Container.FolderName)_$(Get-Random)"
+            New-Item -Path $containerTempPath -ItemType Directory -Force | Out-Null
+
+            $tempVHDPath    = Join-Path $containerTempPath $Container.VHDName
+            $tempOutputPath = Join-Path $containerTempPath $outputFileName
+
+            Write-Log "[$($Container.FolderName)] Copying VHD to temp for conversion..."
+            Copy-Item -Path $sourceVHDPath -Destination $tempVHDPath -Force
+
+            Write-Log "[$($Container.FolderName)] Converting to dynamic $OutputType..."
+            Convert-VHD -Path $tempVHDPath -DestinationPath $tempOutputPath -VHDType Dynamic -DeleteSource -ErrorAction Stop
+
+            $convertedSize    = (Get-Item $tempOutputPath).Length
+            $convertedSizeGB  = [math]::Round($convertedSize / 1GB, 2)
+            Write-Log "[$($Container.FolderName)] Conversion complete ($convertedSizeGB GB). Copying to destination..." -Level SUCCESS
+
+            Copy-Item -Path $tempOutputPath -Destination $destVHDPath -Force
+            Remove-Item -Path $containerTempPath -Recurse -Force -ErrorAction SilentlyContinue
+            $containerTempPath = $null
+        }
+        else {
+            # Already dynamic + correct format — direct copy, no temp needed
+            Write-Log "[$($Container.FolderName)] Already dynamic $($Container.VhdFormat) - copying directly"
+            Copy-Item -Path $sourceVHDPath -Destination $destVHDPath -Force
+            $convertedSize = $Container.VHDSize
+        }
+
+        Write-Log "[$($Container.FolderName)] Migration completed successfully" -Level SUCCESS
+
+        # Set ACLs inline — runs in parallel inside each job rather than serially after all jobs finish
+        $userSID = Get-SIDFromFolderName -FolderName $destFolderName
+        if ($userSID) {
+            Set-ProfileACL -ProfilePath $destFolderPath -VHDXPath $destVHDPath -UserSID $userSID | Out-Null
+        }
+        else {
+            Write-Log "[$($Container.FolderName)] Could not extract SID from folder name - ACLs not set" -Level WARNING
+        }
+
+        return @{
+            Success       = $true
+            SourceFolder  = $Container.FolderName
+            DestFolder    = $destFolderName
+            SourceVHD     = $Container.VHDName
+            DestOutput    = $outputFileName
+            OriginalSize  = $Container.VHDSize
+            ConvertedSize = $convertedSize
+            Skipped       = $false
+            Error         = $null
+        }
+    }
+    catch {
+        Write-Log "[$($Container.FolderName)] Migration failed: $_" -Level ERROR
+
+        if ($containerTempPath -and (Test-Path $containerTempPath)) {
+            Remove-Item -Path $containerTempPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        return @{
+            Success       = $false
+            SourceFolder  = $Container.FolderName
+            DestFolder    = $null
+            SourceVHD     = $Container.VHDName
+            DestOutput    = $null
+            OriginalSize  = $Container.VHDSize
+            ConvertedSize = $null
+            Skipped       = $false
+            Error         = $_.Exception.Message
+        }
+    }
+}
+
 # Export functions
 Export-ModuleMember -Function @(
     'Set-LogFilePath',
@@ -381,5 +563,6 @@ Export-ModuleMember -Function @(
     'Get-SIDFromFolderName',
     'Test-HyperVModule',
     'Set-ShareRootACL',
-    'Set-ProfileACL'
+    'Set-ProfileACL',
+    'Migrate-FSLogixContainer'
 )

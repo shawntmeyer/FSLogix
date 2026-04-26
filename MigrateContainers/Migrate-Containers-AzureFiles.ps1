@@ -295,11 +295,11 @@ if (!(Test-Path $TempPath)) {
 
 $logFile = Join-Path $LogPath "FSLogixMigration_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
-# Import common module
-$modulePath = Join-Path $PSScriptRoot "FSLogixMigrationCommon.psm1"
+# Import utility module
+$modulePath = Join-Path $PSScriptRoot "Modules\FSLogixMigration.psm1"
 if (!(Test-Path $modulePath)) {
-    Write-Host "ERROR: Common module not found: $modulePath" -ForegroundColor Red
-    Write-Host "Please ensure FSLogixMigrationCommon.psm1 is in the same directory as this script." -ForegroundColor Yellow
+    Write-Host "ERROR: Utility module not found: $modulePath" -ForegroundColor Red
+    Write-Host "Please ensure Modules\FSLogixMigration.psm1 is present relative to this script." -ForegroundColor Yellow
     exit 1
 }
 
@@ -736,13 +736,6 @@ function Migrate-FSLogixContainer {
             Write-Log "Source is already dynamic $($Container.VhdFormat) - copying directly (no conversion needed)"
             Copy-Item -Path $sourceVHDPath -Destination $destOutputPath -Force
             $convertedSize = $Container.VHDSize
-            
-            # Copy metadata files
-            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.vhdx', '.backup') }
-            foreach ($file in $metadataFiles) {
-                $destFile = Join-Path $destProfilePath $file.Name
-                Copy-Item -Path $file.FullName -Destination $destFile -Force
-            }
         }
         elseif ($UseAzCopy) {
             # Conversion needed with AzCopy workflow
@@ -775,14 +768,7 @@ function Migrate-FSLogixContainer {
             
             Write-Log "Conversion successful. $OutputType size: $([math]::Round((Get-Item $outputTempPath).Length / 1GB, 2)) GB" -Level SUCCESS
             
-            # Copy metadata files to temp
-            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.backup') }
-            foreach ($file in $metadataFiles) {
-                $destFile = Join-Path $profileTempPath $file.Name
-                Copy-Item -Path $file.FullName -Destination $destFile -Force
-            }
-            
-            # Copy all files to destination with AzCopy
+            # Copy converted VHD to destination with AzCopy
             Write-Log "Using AzCopy to copy files to destination: $destProfilePath"
             $destURL = "https://$DestStorageAccount.file.$script:storageEndpointSuffix/$DestShare/$destFolderName"
             $azCopySuccess = Copy-WithAzCopy -SourcePath "$profileTempPath\*" -DestinationPath $destURL -IsRecursive $false
@@ -808,13 +794,6 @@ function Migrate-FSLogixContainer {
             
             Write-Log "Conversion successful. $OutputType size: $([math]::Round((Get-Item $destOutputPath).Length / 1GB, 2)) GB" -Level SUCCESS
             $convertedSize = (Get-Item $destOutputPath).Length
-            
-            # Copy metadata files directly from source to destination
-            $metadataFiles = Get-ChildItem -Path $sourceProfilePath -File | Where-Object { $_.Extension -notin @('.vhd', '.vhdx', '.backup') }
-            foreach ($file in $metadataFiles) {
-                $destFile = Join-Path $destProfilePath $file.Name
-                Copy-Item -Path $file.FullName -Destination $destFile -Force
-            }
         }
         
         # Set ACLs on destination profile

@@ -9,7 +9,7 @@ This repository provides two specialized migration scripts, each optimized for d
 1. **[Migrate-Containers.ps1](README-AzureFiles.md)** - For **Azure Files** migrations
 2. **[Migrate-Containers-Generic.ps1](README-Generic.md)** - For **generic UNC paths** (Azure NetApp Files, file servers, DFS, etc.)
 
-Both scripts share common functionality through the `FSLogixMigrationCommon.psm1` module and provide:
+Both scripts share common functionality through the `Modules\FSLogixMigration.psm1` utility library and provide:
 
 ✅ VHD to VHDX conversion (or VHD to dynamic VHD optimization)  
 ✅ Automatic ACL configuration with Creator Owner permissions  
@@ -46,7 +46,6 @@ Use this decision guide to choose the right script for your migration scenario:
 ✅ Migrating **using DFS namespaces**  
 ✅ You **don't have** or **prefer not to use** Azure PowerShell module  
 ✅ You want to use **PSCredential** or **current Windows identity** for authentication  
-✅ You want **Robocopy** with multi-threading for transfers  
 ✅ Working with any SMB share accessible via UNC path  
 
 **Example Scenarios:**
@@ -66,7 +65,7 @@ Use this decision guide to choose the right script for your migration scenario:
 |---------|-------------------|-------------------|
 | **Destination Types** | Azure Files only | Any SMB share (ANF, file servers, DFS, NAS) |
 | **Authentication** | Entra ID (RBAC), Storage Keys | Windows identity, PSCredential |
-| **Transfer Tool** | AzCopy or Direct UNC | Robocopy (multi-threaded) |
+| **Transfer Tool** | AzCopy or Direct UNC | Copy-Item (PowerShell) |
 | **Required Modules** | Az PowerShell | None (uses native Windows tools) |
 | **Azure Integration** | Full (storage account, keys, endpoints) | None (works with any UNC path) |
 | **Concurrent Processing** | Yes (AzCopy) | Yes (PowerShell runspaces) |
@@ -93,7 +92,7 @@ Get-ChildItem -Path . -Filter "*.ps1","*.psm1"
 # You should see:
 # - Migrate-Containers.ps1          (Azure Files script)
 # - Migrate-Containers-Generic.ps1  (Generic UNC script)
-# - FSLogixMigrationCommon.psm1     (Shared functions)
+# - Modules\FSLogixMigration.psm1   (Utility library)
 ```
 
 3. **Install prerequisites:**
@@ -143,7 +142,8 @@ MigrateContainers/
 ├── README-Generic.md                 # Generic UNC script documentation
 ├── Migrate-Containers.ps1            # Azure Files migration script
 ├── Migrate-Containers-Generic.ps1    # Generic UNC migration script
-├── FSLogixMigrationCommon.psm1       # Shared function module
+├── Modules/
+│   └── FSLogixMigration.psm1         # Utility function library
 └── Logs/                             # Auto-created log directory
 ```
 
@@ -172,12 +172,12 @@ Connect-AzAccount
 
 **Recommended Script**: `Migrate-Containers-Generic.ps1`
 
-**Why**: Works with any UNC path, no Azure PowerShell required, Robocopy handles SMB well
+**Why**: Works with any UNC path, no Azure PowerShell required, Copy-Item handles SMB shares natively
 
 **Example**:
 ```powershell
 .\Migrate-Containers-Generic.ps1 -SourceUNCPath "\\onprem-fs\profiles" `
-    -DestinationUNCPath "\\10.0.1.10\profiles" -ConcurrentProfiles 4 -RobocopyThreads 8
+    -DestinationUNCPath "\\10.0.1.10\profiles" -ConcurrentProfiles 4
 ```
 
 ---
@@ -290,7 +290,6 @@ Both scripts share many common parameters:
 
 - ✅ SMB access to source and destination shares
 - ✅ Optional: PSCredential if not using current Windows identity
-- ✅ Robocopy (built-in with Windows)
 
 ## 🛡️ Security & Best Practices
 
@@ -336,7 +335,7 @@ Both scripts share many common parameters:
 A: No. Azure NetApp Files is accessed via a standard UNC path and doesn't use the Azure Storage API. Use the Generic UNC script instead.
 
 **Q: Which script is faster?**  
-A: Performance depends more on your network and storage than the script choice. Both support parallelism. Azure Files with AzCopy can be faster for Azure Files to Azure Files migrations. Generic with Robocopy is optimized for any SMB share.
+A: Performance depends more on your network and storage than the script choice. Both support parallelism. Azure Files with AzCopy can be faster for Azure Files to Azure Files migrations. The Generic script uses Copy-Item which is well suited to any SMB share.
 
 **Q: Do these scripts delete source profiles?**  
 A: No. Source profiles are never deleted (except in-place VHD optimization, where originals are backed up first).
@@ -391,7 +390,7 @@ A: The script doesn't support resume. Re-run it, and it will process all profile
 **Generic UNC Script:**
 - **"Cannot access UNC path"**: Verify network connectivity, DNS resolution, firewall (port 445)
 - **Authentication failures**: Use `-SourceCredential` / `-DestinationCredential` with valid credentials
-- **Robocopy errors**: Check `Robocopy_*.log` files in LogPath for details
+- **Copy failures**: Check the main migration log in LogPath for per-file error details
 
 ## 🤝 Contributing
 

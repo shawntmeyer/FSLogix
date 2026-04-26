@@ -1,6 +1,6 @@
 # FSLogix Profile Migration Script (Generic UNC Paths)
 
-A comprehensive PowerShell script for migrating FSLogix user profile containers between **any SMB file shares** including Azure NetApp Files, Windows File Servers, DFS namespaces, and other UNC paths. Performs VHD/VHDX conversion, ACL management, and optional folder renaming with multi-threaded Robocopy transfers.
+A comprehensive PowerShell script for migrating FSLogix user profile containers between **any SMB file shares** including Azure NetApp Files, Windows File Servers, DFS namespaces, and other UNC paths. Performs VHD/VHDX conversion, ACL management, and optional folder renaming with concurrent PowerShell-based file transfers.
 
 ## ⚠️ Disclaimer
 
@@ -13,16 +13,14 @@ This script automates the migration of FSLogix profile containers (VHD/VHDX file
 - Converting VHD to dynamic VHDX format (or optimizing VHD to dynamic VHD)
 - Setting proper NTFS permissions and ownership
 - Optionally renaming folders from `SID_username` to `username_SID` format
-- Supporting multi-threaded transfers with Robocopy
-- Providing concurrent profile-level parallelism
+- Concurrent profile-level parallelism with PowerShell runspaces
 - Comprehensive logging and progress tracking
 
 ## Features
 
 ✅ **Universal Support**: Works with Azure NetApp Files, Windows File Servers, DFS, NAS appliances  
 ✅ **Format Conversion**: VHD → VHDX or VHD → Dynamic VHD  
-✅ **Multi-threaded Transfers**: Robocopy with configurable thread count  
-✅ **Concurrent Processing**: Parallel profile migrations for faster completion  
+✅ **Concurrent Processing**: Parallel profile migrations via PowerShell runspaces  
 ✅ **Folder Renaming**: Change from SID_username to username_SID format  
 ✅ **ACL Management**: Automatically set ownership and permissions  
 ✅ **Flexible Authentication**: Current Windows identity or PSCredential  
@@ -38,7 +36,6 @@ This script automates the migration of FSLogix profile containers (VHD/VHDX file
 | --------- | ------- | ------------ |
 | **PowerShell** | 5.1 or later | Pre-installed on Windows |
 | **Hyper-V PowerShell Module** | Latest | `Install-WindowsFeature -Name Hyper-V-PowerShell` |
-| **Robocopy** | Built-in | Included with Windows |
 
 ### Permissions
 
@@ -72,8 +69,8 @@ cd FSLogix\MigrateContainers
 ```powershell
 # You should have these files:
 # - Migrate-Containers-Generic.ps1
-# - FSLogixMigrationCommon.psm1
-Get-ChildItem -Path . -Filter "*.ps1","*.psm1"
+# - Modules\FSLogixMigration.psm1
+Get-ChildItem -Path . -Filter "*.ps1","*.psm1" -Recurse
 ```
 
 3. **Install Hyper-V PowerShell module (if not already installed):**
@@ -88,9 +85,6 @@ Install-WindowsFeature -Name Hyper-V-PowerShell -IncludeManagementTools
 ```powershell
 # Test Hyper-V module
 Get-Module -ListAvailable -Name Hyper-V
-
-# Test Robocopy
-robocopy /?
 ```
 
 ## Usage
@@ -104,9 +98,8 @@ robocopy /?
     [-SourceCredential <PSCredential>] `
     [-DestinationCredential <PSCredential>] `
     [-OutputType <VHD|VHDX>] `
-    [-RenameFolders] `
-    [-ConcurrentProfiles <int>] `
-    [-RobocopyThreads <int>]
+    [-RenameFolders <bool>] `
+    [-ConcurrentProfiles <int>]
 ```
 
 ### Example Scenarios
@@ -166,8 +159,7 @@ $dstCred = Get-Credential -Message "Enter credentials for destination share"
 .\Migrate-Containers-Generic.ps1 `
     -SourceUNCPath "\\source\profiles" `
     -DestinationUNCPath "\\dest\profiles" `
-    -ConcurrentProfiles 8 `
-    -RobocopyThreads 16
+    -ConcurrentProfiles 8
 ```
 
 **Expected Time**: ~30-45 minutes for 100x10GB profiles
@@ -196,7 +188,7 @@ $dstCred = Get-Credential -Message "Enter credentials for destination share"
 .\Migrate-Containers-Generic.ps1 `
     -SourceUNCPath "\\oldserver\profiles" `
     -DestinationUNCPath "\\newserver\profiles" `
-    -RenameFolders
+    -RenameFolders $true
 ```
 
 **Before**: `S-1-5-21-xxx_jdoe`  
@@ -236,9 +228,8 @@ $dstCred = Get-Credential -Message "Enter credentials for destination share"
 | `SourceCredential` | PSCredential | Current identity | No | Credentials for source share |
 | `DestinationCredential` | PSCredential | Current identity | No | Credentials for destination share |
 | `OutputType` | String | `VHDX` | No | Output format: `VHD` or `VHDX` |
-| `RenameFolders` | Switch | `$false` | No | Rename SID_user to user_SID |
+| `RenameFolders` | Bool | `$false` | No | Rename SID_user to user_SID (`$true`/`$false`) |
 | `ConcurrentProfiles` | Int | `4` | No | Number of parallel profile migrations |
-| `RobocopyThreads` | Int | `8` | No | Robocopy threads per transfer (/MT) |
 | `LogPath` | String | `.\Logs` | No | Directory for log files |
 | `TempPath` | String | `$env:TEMP\FSLogixMigration` | No | Temp directory for VHD conversion |
 | `AdministratorGroupSIDs` | String[] | `@('S-1-5-32-544')` | No | Admin group SIDs for ACLs |
@@ -246,27 +237,11 @@ $dstCred = Get-Credential -Message "Enter credentials for destination share"
 
 ## Performance Considerations
 
-### Robocopy Multi-threading
-
-**Robocopy `/MT` Switch:**
-- Controls parallelism **within** each file transfer operation
-- Good for copying many small files (metadata, registry hives, etc.)
-- **Recommended**: 8-16 threads for most scenarios
-- Higher values may not improve performance significantly
-
-**Impact:**
-```
-/MT:1  = Single-threaded (slowest)
-/MT:8  = 8 parallel transfer threads (default, good balance)
-/MT:16 = 16 parallel threads (diminishing returns)
-/MT:32 = 32 parallel threads (may overload network)
-```
-
 ### Profile-level Concurrency
 
 **ConcurrentProfiles Parameter:**
 - Controls how many profiles are migrated **simultaneously**
-- Each concurrent job runs its own VHD conversion + Robocopy operation
+- Each concurrent job runs its own VHD conversion + Copy-Item operation
 - **Recommended**: 2-8 depending on resources
 
 **Resource Requirements:**
@@ -312,12 +287,7 @@ Located in `LogPath` (default: `.\Logs\`):
    - Includes debug information
    - Used for troubleshooting
 
-2. **Robocopy Log**: `Robocopy_YYYYMMDD_HHMMSS.log`
-   - Detailed Robocopy transfer logs
-   - File-by-file transfer details
-   - Helpful for diagnosing transfer issues
-
-3. **Results CSV**: `MigrationResults_Generic_YYYYMMDD_HHMMSS.csv`
+2. **Results CSV**: `MigrationResults_Generic_YYYYMMDD_HHMMSS.csv`
    - Summary of each profile migration
    - Columns: SourceFolder, DestFolder, SourceVHD, DestOutput, OriginalSize, ConvertedSize, Success, Error
    - Import into Excel for analysis
@@ -440,8 +410,7 @@ Resolve-DnsName "server.contoso.com"
 **Solutions**:
 
 1. Increase concurrent profiles: `-ConcurrentProfiles 8`
-2. Adjust Robocopy threads: `-RobocopyThreads 16`
-3. Check network bandwidth: `Test-NetConnection -ComputerName server -Port 445 -InformationLevel Detailed`
+2. Check network bandwidth: `Test-NetConnection -ComputerName server -Port 445 -InformationLevel Detailed`
 4. Verify storage is not bottleneck (check IOPS/throughput limits)
 5. Reduce concurrency if CPU/memory constrained
 6. For ANF: Check volume throughput tier limits
@@ -456,19 +425,6 @@ Resolve-DnsName "server.contoso.com"
 2. Change temp path to larger drive: `-TempPath "D:\Temp"`
 3. Migrate in smaller batches
 4. Clean up temp files from failed migrations
-
-#### Robocopy Errors
-
-**Symptom**: Robocopy logs show errors or unusual exit codes
-
-**Troubleshooting**:
-
-1. Check Robocopy log files in LogPath
-2. Common exit codes:
-   - 0-7: Success (some files copied, some skipped, etc.)
-   - 8+: Errors occurred
-3. Review `Robocopy_*.log` for specific file errors
-4. Verify source files are not locked or in use
 
 ## Best Practices
 
@@ -636,7 +592,7 @@ Get-Content "C:\ProgramData\FSLogix\Logs\Profile\*.log" -Tail 50
 |---------|-------------------|-------------------|
 | **Destination** | Any SMB share (file servers, ANF, DFS) | Azure Files only |
 | **Authentication** | Windows identity or PSCredential | Entra ID or Storage Keys |
-| **Transfer Tool** | Robocopy (native) | AzCopy or Direct UNC |
+| **Transfer Tool** | Copy-Item (PowerShell) | AzCopy or Direct UNC |
 | **Azure Dependencies** | None | Az PowerShell module |
 | **Best For** | Azure NetApp Files, file servers, hybrid | Pure Azure Files deployments |
 
@@ -645,7 +601,7 @@ Get-Content "C:\ProgramData\FSLogix\Logs\Profile\*.log" -Tail 50
 - Migrating between Windows File Servers
 - DFS namespace migrations
 - No Azure PowerShell module available
-- Prefer native Windows tools (Robocopy)
+- No external tool dependencies (uses built-in PowerShell Copy-Item)
 
 **When to use Azure Files script:**
 - Migrating between Azure Storage Accounts
@@ -664,16 +620,10 @@ A: No. Source profiles remain untouched. For in-place VHD optimization, original
 A: Yes, as long as the migration server has network connectivity to both the on-prem file server and ANF (via ExpressRoute, VPN, or internet).
 
 **Q: How does this compare to AzCopy for Azure Files?**  
-A: Robocopy is better for generic SMB shares. AzCopy is optimized for Azure Files specifically. Choose based on your destination (ANF = Robocopy, Azure Files = AzCopy).
+A: Copy-Item is sufficient for any SMB share and has no external dependencies. AzCopy is optimized for Azure Files specifically. Choose based on your destination: ANF or file servers = this script, Azure Files = the Azure Files script.
 
 **Q: Can I pause and resume the migration?**  
 A: No. The script processes profiles completely. If interrupted, re-run the script - it will process all profiles again.
-
-**Q: What's the impact of RobocopyThreads vs ConcurrentProfiles?**  
-A:
-- **RobocopyThreads**: Parallel threads **within** each file copy operation (metadata files)
-- **ConcurrentProfiles**: Number of profiles migrated **simultaneously** (separate jobs)
-- Both can be tuned for optimal performance
 
 **Q: Does this work with NFS?**  
 A: No. The script requires SMB/CIFS shares accessible via UNC path.
@@ -705,12 +655,11 @@ This script is provided as-is under the MIT License. See LICENSE file for detail
 - VHD to VHDX conversion
 - VHD to dynamic VHD optimization
 - PSCredential authentication support
-- Robocopy multi-threaded transfers
-- Concurrent profile-level processing
+- Concurrent profile-level processing via PowerShell runspaces
 - ACL management with Creator Owner
 - Folder renaming (SID_username ↔ username_SID)
 - Comprehensive logging and reporting
-- Shared function module (FSLogixMigrationCommon.psm1)
+- Utility function library (Modules\FSLogixMigration.psm1)
 
 ---
 
