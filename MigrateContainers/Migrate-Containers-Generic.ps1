@@ -1,3 +1,5 @@
+#Requires -RunAsAdministrator
+
 <#
 .SYNOPSIS
     Migrates FSLogix profile VHD/VHDX files between generic UNC paths with format conversion and ACL management.
@@ -251,36 +253,13 @@ Set-LogFilePath -Path $logFile
 
 function Get-FSLogixContainers {
     param(
-        [string]$UNCPath,
-        [PSCredential]$Credential
+        [string]$UNCPath
     )
 
     try {
         Write-Log "Enumerating FSLogix profiles from $UNCPath"
 
-        $driveLetter = Get-AvailableDriveLetter
-
-        $driveParams = @{
-            Name       = $driveLetter
-            PSProvider = 'FileSystem'
-            Root       = $UNCPath
-            Scope      = 'Global'
-            ErrorAction = 'Stop'
-        }
-
-        if ($Credential) {
-            $driveParams['Credential'] = $Credential
-            Write-Log "Mapping drive ${driveLetter}: with provided credentials"
-        }
-        else {
-            Write-Log "Mapping drive ${driveLetter}: with current Windows identity"
-        }
-
-        New-PSDrive @driveParams | Out-Null
-        Write-Log "Successfully mapped drive ${driveLetter}: to $UNCPath" -Level SUCCESS
-
-        $profilePath = "${driveLetter}:\"
-        $folders     = Get-ChildItem -Path $profilePath -Directory -ErrorAction SilentlyContinue
+        $folders = Get-ChildItem -Path $UNCPath -Directory -ErrorAction SilentlyContinue
 
         $Containers = @()
         foreach ($folder in $folders) {
@@ -308,10 +287,9 @@ function Get-FSLogixContainers {
                     IsDynamic  = $isDynamic
                     VhdFormat  = $vhdFormat
                 }
+                Write-Verbose "  $($folder.Name)\$($vhd.Name) | $vhdFormat | Dynamic=$isDynamic | $([math]::Round($vhd.Length / 1MB, 1)) MB"
             }
         }
-
-        Remove-PSDrive -Name $driveLetter -Force
 
         Write-Log "Found $($Containers.Count) VHD/VHDX files to migrate" -Level SUCCESS
 
@@ -325,9 +303,6 @@ function Get-FSLogixContainers {
     }
     catch {
         Write-Log "Error enumerating profiles: $_" -Level ERROR
-        if ($driveLetter -and (Get-PSDrive -Name $driveLetter -ErrorAction SilentlyContinue)) {
-            Remove-PSDrive -Name $driveLetter -Force -ErrorAction SilentlyContinue
-        }
         throw
     }
 }
@@ -335,48 +310,56 @@ function Get-FSLogixContainers {
 function Invoke-ConcurrentMigration {
     param(
         [array]$Containers,
-        [string]$SourceDrive,
-        [string]$DestDrive,
+        [string]$SourceUNCPath,
+        [string]$DestUNCPath,
         [bool]$Rename,
         [string]$TempPath,
         [string]$OutputType,
         [bool]$SameLocation,
         [int]$MaxConcurrent,
         [string]$LogFile,
+        [string]$ModulePath,
         [bool]$ForceConversion
     )
 
     $runspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrent)
     $runspacePool.Open()
 
-    # Each runspace imports the common module and calls Migrate-FSLogixContainer directly.
-    # There is no duplicated migration logic here — a single authoritative implementation lives
-    # in Modules\FSLogixMigration.psm1.
+    # Capture preference variables to pass into each runspace explicitly.
+    # Runspaces do not inherit $VerbosePreference / $DebugPreference from the parent session.
+    $capturedVerbose = $VerbosePreference
+    $capturedDebug   = $DebugPreference
+
+    # Credentials are not passed to runspaces: Connect-UNCPath in the main script establishes
+    # an OS-level SMB session (net use) that is accessible from all runspaces.
+    # UNC paths are used directly — no drive letters needed.
     $scriptBlock = {
         param(
             $Container,
-            $SourceDrive,
-            $DestDrive,
+            $SourceUNCPath,
+            $DestUNCPath,
             $Rename,
             $TempPath,
             $OutputType,
             $SameLocation,
             $LogFile,
             $ModulePath,
-            $ForceConversion
+            $ForceConversion,
+            $VerbosePreference,
+            $DebugPreference
         )
 
         Import-Module $ModulePath -Force
         Set-LogFilePath -Path $LogFile
 
         return Migrate-FSLogixContainer `
-            -Container      $Container `
-            -SourceDrive    $SourceDrive `
-            -DestDrive      $DestDrive `
-            -Rename         $Rename `
-            -TempPath       $TempPath `
-            -OutputType     $OutputType `
-            -SameLocation   $SameLocation `
+            -Container       $Container `
+            -SourceUNCPath   $SourceUNCPath `
+            -DestUNCPath     $DestUNCPath `
+            -Rename          $Rename `
+            -TempPath        $TempPath `
+            -OutputType      $OutputType `
+            -SameLocation    $SameLocation `
             -ForceConversion $ForceConversion
     }
 
@@ -384,20 +367,23 @@ function Invoke-ConcurrentMigration {
     foreach ($Container in $Containers) {
         $ps = [powershell]::Create().AddScript($scriptBlock).AddParameters(@{
             Container       = $Container
-            SourceDrive     = $SourceDrive
-            DestDrive       = $DestDrive
+            SourceUNCPath   = $SourceUNCPath
+            DestUNCPath     = $DestUNCPath
             Rename          = $Rename
             TempPath        = $TempPath
             OutputType      = $OutputType
             SameLocation    = $SameLocation
             LogFile         = $LogFile
-            ModulePath      = $modulePath
+            ModulePath      = $ModulePath
             ForceConversion = $ForceConversion
+            VerbosePreference = $capturedVerbose
+            DebugPreference   = $capturedDebug
         })
 
         $ps.RunspacePool = $runspacePool
         $jobs += [PSCustomObject]@{
             Pipe      = $ps
+            Container = $Container
             Status    = $ps.BeginInvoke()
             Collected = $false
         }
@@ -409,8 +395,31 @@ function Invoke-ConcurrentMigration {
 
     while (($jobs | Where-Object { -not $_.Collected }).Count -gt 0) {
         foreach ($job in ($jobs | Where-Object { $_.Status.IsCompleted -and !$_.Collected })) {
-            foreach ($item in $job.Pipe.EndInvoke($job.Status)) {
-                $results += $item
+            # Surface any terminating errors from the runspace
+            if ($job.Pipe.HadErrors) {
+                foreach ($err in $job.Pipe.Streams.Error) {
+                    Write-Log "[$($job.Container.FolderName)] Runspace error: $err" -Level ERROR
+                }
+            }
+            foreach ($msg in $job.Pipe.Streams.Verbose) { Write-Verbose $msg.Message }
+            foreach ($msg in $job.Pipe.Streams.Debug)   { Write-Debug   $msg.Message }
+            $items = $job.Pipe.EndInvoke($job.Status)
+            if ($items.Count -gt 0) {
+                foreach ($item in $items) { $results += $item }
+            }
+            else {
+                # Runspace returned nothing — treat as failure
+                $results += [PSCustomObject]@{
+                    Success       = $false
+                    SourceFolder  = $job.Container.FolderName
+                    DestFolder    = $null
+                    SourceVHD     = $job.Container.VHDName
+                    DestOutput    = $null
+                    OriginalSize  = $job.Container.VHDSize
+                    ConvertedSize = $null
+                    Skipped       = $false
+                    Error         = 'Runspace returned no result (check log for errors)'
+                }
             }
             $job.Pipe.Dispose()
             $job.Collected = $true
@@ -488,7 +497,7 @@ if (!$sameLocation) {
 
 # Get all profiles to migrate
 Write-Log "Enumerating FSLogix profiles..."
-$Containers = Get-FSLogixContainers -UNCPath $SourceUNCPath -Credential $SourceCredential
+$Containers = Get-FSLogixContainers -UNCPath $SourceUNCPath
 
 if ($Containers.Count -eq 0) {
     Write-Log "No VHD files found to migrate" -Level WARNING
@@ -497,71 +506,26 @@ if ($Containers.Count -eq 0) {
 
 Write-Log "Found $($Containers.Count) profiles to migrate"
 
-# Map source drive
-Write-Log "Mapping source drive..."
-try {
-    $sourceDrive = Get-AvailableDriveLetter
-    
-    $sourceDriveParams = @{
-        Name = $sourceDrive
-        PSProvider = 'FileSystem'
-        Root = $SourceUNCPath
-        Scope = 'Global'
-        ErrorAction = 'Stop'
-    }
-    
-    if ($SourceCredential) {
-        $sourceDriveParams['Credential'] = $SourceCredential
-        Write-Log "Using provided credentials for source"
-    }
-    
-    New-PSDrive @sourceDriveParams | Out-Null
-    Write-Log "Mapped source drive ${sourceDrive}:" -Level SUCCESS
-}
-catch {
-    Write-Log "Failed to map source drive: $_" -Level ERROR
-    exit 1
+# Authenticate to shares if explicit credentials were provided.
+# Connect-UNCPath uses net use to establish an OS-level SMB session accessible
+# from all runspaces — no drive letters required.
+if ($SourceCredential) {
+    Write-Log "Authenticating to source share with provided credentials..."
+    Connect-UNCPath -UNCPath $SourceUNCPath -Credential $SourceCredential
+    Write-Log "Authenticated to source share" -Level SUCCESS
 }
 
-# Map destination drive (or use same drive if same location)
-if ($sameLocation) {
-    $destDrive = $sourceDrive
-    Write-Log "Using same drive for destination (same location migration)"
-}
-else {
-    Write-Log "Mapping destination drive..."
-    try {
-        $destDrive = Get-AvailableDriveLetter
-        
-        $destDriveParams = @{
-            Name = $destDrive
-            PSProvider = 'FileSystem'
-            Root = $DestinationUNCPath
-            Scope = 'Global'
-            ErrorAction = 'Stop'
-        }
-        
-        if ($DestinationCredential) {
-            $destDriveParams['Credential'] = $DestinationCredential
-            Write-Log "Using provided credentials for destination"
-        }
-        
-        New-PSDrive @destDriveParams | Out-Null
-        Write-Log "Mapped destination drive ${destDrive}:" -Level SUCCESS
-    }
-    catch {
-        Write-Log "Failed to map destination drive: $_" -Level ERROR
-        Remove-PSDrive -Name $sourceDrive -Force -ErrorAction SilentlyContinue
-        exit 1
-    }
+if (!$sameLocation -and $DestinationCredential) {
+    Write-Log "Authenticating to destination share with provided credentials..."
+    Connect-UNCPath -UNCPath $DestinationUNCPath -Credential $DestinationCredential
+    Write-Log "Authenticated to destination share" -Level SUCCESS
 }
 
 # Configure ACLs on destination share root only if it's a new destination
 if (!$sameLocation) {
     Write-Log "Configuring ACLs on destination share root (new location detected)..."
     try {
-        $destRootPath = "${destDrive}:\"
-        $aclResult = Set-ShareRootACL -ShareRootPath $destRootPath -AdminSIDs $AdministratorGroupSIDs -UserSIDs $UserGroupSIDs
+        $aclResult = Set-ShareRootACL -ShareRootPath $DestinationUNCPath -AdminSIDs $AdministratorGroupSIDs -UserSIDs $UserGroupSIDs
         
         if (!$aclResult) {
             Write-Log "Warning: Failed to set share root ACLs" -Level WARNING
@@ -583,15 +547,16 @@ $failed    = 0
 Write-Log "Starting profile migration with $ConcurrentProfiles concurrent jobs..."
 
 $results = Invoke-ConcurrentMigration `
-    -Containers     $Containers `
-    -SourceDrive    $sourceDrive `
-    -DestDrive      $destDrive `
-    -Rename         $RenameFolders `
-    -TempPath       $TempPath `
-    -OutputType     $OutputType `
-    -SameLocation   $sameLocation `
-    -MaxConcurrent  $ConcurrentProfiles `
-    -LogFile        $logFile `
+    -Containers      $Containers `
+    -SourceUNCPath   $SourceUNCPath `
+    -DestUNCPath     $DestinationUNCPath `
+    -Rename          $RenameFolders `
+    -TempPath        $TempPath `
+    -OutputType      $OutputType `
+    -SameLocation    $sameLocation `
+    -MaxConcurrent   $ConcurrentProfiles `
+    -LogFile         $logFile `
+    -ModulePath      $modulePath `
     -ForceConversion $Force
 
 # Tally results — ACLs were already applied inside each parallel job
@@ -608,16 +573,12 @@ foreach ($result in $results) {
     }
 }
 
-# Cleanup: Unmap drives
-Write-Log "Unmapping drives..."
-if ($sameLocation) {
-    Remove-PSDrive -Name $sourceDrive -Force -ErrorAction SilentlyContinue
-    Write-Log "Unmapped drive ${sourceDrive}:"
+# Disconnect authenticated shares if explicit credentials were used
+if ($SourceCredential) {
+    Disconnect-UNCPath -UNCPath $SourceUNCPath
 }
-else {
-    Remove-PSDrive -Name $sourceDrive -Force -ErrorAction SilentlyContinue
-    Remove-PSDrive -Name $destDrive -Force -ErrorAction SilentlyContinue
-    Write-Log "Unmapped drives ${sourceDrive}: and ${destDrive}:"
+if (!$sameLocation -and $DestinationCredential) {
+    Disconnect-UNCPath -UNCPath $DestinationUNCPath
 }
 
 # Summary

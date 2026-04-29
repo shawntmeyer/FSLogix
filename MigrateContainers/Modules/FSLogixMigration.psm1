@@ -141,6 +141,55 @@ function Get-SIDFromFolderName {
     return $null
 }
 
+function Connect-UNCPath {
+    <#
+    .SYNOPSIS
+        Authenticates to a UNC path using explicit credentials via net use.
+
+    .DESCRIPTION
+        Establishes an OS-level SMB session so the UNC path is accessible from all
+        runspaces and threads in the current process. No drive letter is allocated.
+        Has no effect when called without credentials (current identity is used).
+
+    .PARAMETER UNCPath
+        The UNC share root to authenticate against (e.g. \\server\share).
+
+    .PARAMETER Credential
+        PSCredential to authenticate with.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$UNCPath,
+
+        [Parameter(Mandatory = $true)]
+        [PSCredential]$Credential
+    )
+
+    $netCred = $Credential.GetNetworkCredential()
+    $user    = if ($netCred.Domain) { "$($netCred.Domain)\$($netCred.UserName)" } else { $netCred.UserName }
+
+    $output = net use $UNCPath $netCred.Password /user:$user /persistent:no 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "net use authentication failed for ${UNCPath}: $output"
+    }
+}
+
+function Disconnect-UNCPath {
+    <#
+    .SYNOPSIS
+        Removes an OS-level SMB session established by Connect-UNCPath.
+
+    .PARAMETER UNCPath
+        The UNC share root to disconnect (e.g. \\server\share).
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$UNCPath
+    )
+
+    net use $UNCPath /delete /y 2>&1 | Out-Null
+}
+
 function Test-HyperVModule {
     <#
     .SYNOPSIS
@@ -388,11 +437,11 @@ function Migrate-FSLogixContainer {
         PSCustomObject describing the profile: FolderName, VHDName, VHDPath, VHDSize,
         IsDynamic, VhdFormat (as returned by Get-FSLogixContainers).
 
-    .PARAMETER SourceDrive
-        Drive letter (without colon) mapped to the source UNC share.
+    .PARAMETER SourceUNCPath
+        UNC path to the source share (e.g. \\server\profiles).
 
-    .PARAMETER DestDrive
-        Drive letter (without colon) mapped to the destination UNC share.
+    .PARAMETER DestUNCPath
+        UNC path to the destination share (e.g. \\newserver\profiles).
 
     .PARAMETER Rename
         When $true, renames the folder from SID_username to username_SID format.
@@ -415,8 +464,8 @@ function Migrate-FSLogixContainer {
     #>
     param(
         [PSCustomObject]$Container,
-        [string]$SourceDrive,
-        [string]$DestDrive,
+        [string]$SourceUNCPath,
+        [string]$DestUNCPath,
         [bool]$Rename,
         [string]$TempPath,
         [string]$OutputType,
@@ -432,8 +481,10 @@ function Migrate-FSLogixContainer {
         # Resolve destination folder name (optionally rename SID_user → user_SID)
         $destFolderName = if ($Rename) { Convert-FolderName $Container.FolderName } else { $Container.FolderName }
 
-        $sourceFolderPath = Join-Path "${SourceDrive}:\" $Container.FolderName
-        $destFolderPath   = Join-Path "${DestDrive}:\"   $destFolderName
+        $sourceFolderPath = Join-Path $SourceUNCPath $Container.FolderName
+        $destFolderPath   = Join-Path $DestUNCPath   $destFolderName
+        Write-Verbose "[$($Container.FolderName)] Source folder : $sourceFolderPath"
+        Write-Verbose "[$($Container.FolderName)] Dest folder   : $destFolderPath"
 
         if (!(Test-Path $destFolderPath)) {
             New-Item -Path $destFolderPath -ItemType Directory -Force | Out-Null
@@ -444,6 +495,9 @@ function Migrate-FSLogixContainer {
         $outputExtension = if ($OutputType -eq 'VHDX') { '.vhdx' } else { '.vhd' }
         $outputFileName  = [System.IO.Path]::ChangeExtension($Container.VHDName, $outputExtension)
         $destVHDPath     = Join-Path $destFolderPath $outputFileName
+        Write-Verbose "[$($Container.FolderName)] Source VHD : $sourceVHDPath ($([math]::Round($Container.VHDSize / 1MB, 1)) MB)"
+        Write-Verbose "[$($Container.FolderName)] Dest VHD   : $destVHDPath"
+        Write-Debug   "[$($Container.FolderName)] IsDynamic=$($Container.IsDynamic)  VhdFormat=$($Container.VhdFormat)  OutputType=$OutputType  SameLocation=$SameLocation  ForceConversion=$ForceConversion"
 
         # Decide whether conversion is needed
         $needsConversion  = $false
@@ -464,7 +518,7 @@ function Migrate-FSLogixContainer {
         elseif ($SameLocation) {
             # Already dynamic + correct format + same location → nothing to do
             Write-Log "[$($Container.FolderName)] Skipping - already dynamic $($Container.VhdFormat) at destination" -Level SUCCESS
-            return @{
+            return [PSCustomObject]@{
                 Success       = $true
                 SourceFolder  = $Container.FolderName
                 DestFolder    = $destFolderName
@@ -488,6 +542,8 @@ function Migrate-FSLogixContainer {
 
             $tempVHDPath    = Join-Path $containerTempPath $Container.VHDName
             $tempOutputPath = Join-Path $containerTempPath $outputFileName
+            Write-Debug "[$($Container.FolderName)] Temp VHD    : $tempVHDPath"
+            Write-Debug "[$($Container.FolderName)] Temp output : $tempOutputPath"
 
             Write-Log "[$($Container.FolderName)] Copying VHD to temp for conversion..."
             Copy-Item -Path $sourceVHDPath -Destination $tempVHDPath -Force
@@ -498,6 +554,7 @@ function Migrate-FSLogixContainer {
             $convertedSize    = (Get-Item $tempOutputPath).Length
             $convertedSizeGB  = [math]::Round($convertedSize / 1GB, 2)
             Write-Log "[$($Container.FolderName)] Conversion complete ($convertedSizeGB GB). Copying to destination..." -Level SUCCESS
+            Write-Verbose "[$($Container.FolderName)] Size: $([math]::Round($Container.VHDSize / 1MB, 1)) MB (original) -> $([math]::Round($convertedSize / 1MB, 1)) MB (converted)"
 
             Copy-Item -Path $tempOutputPath -Destination $destVHDPath -Force
             Remove-Item -Path $containerTempPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -521,7 +578,7 @@ function Migrate-FSLogixContainer {
             Write-Log "[$($Container.FolderName)] Could not extract SID from folder name - ACLs not set" -Level WARNING
         }
 
-        return @{
+        return [PSCustomObject]@{
             Success       = $true
             SourceFolder  = $Container.FolderName
             DestFolder    = $destFolderName
@@ -540,7 +597,7 @@ function Migrate-FSLogixContainer {
             Remove-Item -Path $containerTempPath -Recurse -Force -ErrorAction SilentlyContinue
         }
 
-        return @{
+        return [PSCustomObject]@{
             Success       = $false
             SourceFolder  = $Container.FolderName
             DestFolder    = $null
@@ -564,5 +621,7 @@ Export-ModuleMember -Function @(
     'Test-HyperVModule',
     'Set-ShareRootACL',
     'Set-ProfileACL',
-    'Migrate-FSLogixContainer'
+    'Migrate-FSLogixContainer',
+    'Connect-UNCPath',
+    'Disconnect-UNCPath'
 )
