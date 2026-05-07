@@ -350,7 +350,8 @@ function Invoke-ConcurrentMigration {
         )
 
         Import-Module $ModulePath -Force
-        Set-LogFilePath -Path $LogFile
+        # Do NOT call Set-LogFilePath here. Runspaces accumulate messages in $script:LogMessages
+        # and return them in the result object. The main thread is the sole writer to the log file.
 
         return Migrate-FSLogixContainer `
             -Container       $Container `
@@ -405,7 +406,16 @@ function Invoke-ConcurrentMigration {
             foreach ($msg in $job.Pipe.Streams.Debug)   { Write-Debug   $msg.Message }
             $items = $job.Pipe.EndInvoke($job.Status)
             if ($items.Count -gt 0) {
-                foreach ($item in $items) { $results += $item }
+                foreach ($item in $items) {
+                    # Flush messages accumulated inside the runspace to the log file.
+                    # Only the main thread writes to the file — no contention possible.
+                    if ($item.LogMessages) {
+                        foreach ($msg in $item.LogMessages) {
+                            Add-Content -Path $LogFile -Value $msg
+                        }
+                    }
+                    $results += $item
+                }
             }
             else {
                 # Runspace returned nothing — treat as failure

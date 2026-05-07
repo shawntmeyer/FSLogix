@@ -17,13 +17,15 @@
     Date           : 2026-04-26
 #>
 
-# Module-level variable for log file path (set by calling script)
+# Module-level variables: log file path (main thread only) and per-runspace message accumulator
 $script:LogFilePath = $null
+$script:LogMessages  = [System.Collections.Generic.List[string]]::new()
 
 function Set-LogFilePath {
     <#
     .SYNOPSIS
         Sets the log file path for the Write-Log function.
+        Call only from the main thread — never from inside a runspace.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -63,7 +65,10 @@ function Write-Log {
         default   { Write-Host $logMessage }
     }
     
-    # Write to file if path is set
+    # Accumulate message so callers (e.g. runspaces) can return it for the main thread to flush
+    $script:LogMessages.Add($logMessage)
+
+    # Write to file only when a path is set (main thread); runspaces never set this
     if ($script:LogFilePath) {
         Add-Content -Path $script:LogFilePath -Value $logMessage
     }
@@ -528,6 +533,7 @@ function Migrate-FSLogixContainer {
                 ConvertedSize = $Container.VHDSize
                 Skipped       = $true
                 Error         = $null
+                LogMessages   = $script:LogMessages.ToArray()
             }
         }
 
@@ -588,6 +594,7 @@ function Migrate-FSLogixContainer {
             ConvertedSize = $convertedSize
             Skipped       = $false
             Error         = $null
+            LogMessages   = $script:LogMessages.ToArray()
         }
     }
     catch {
@@ -607,6 +614,7 @@ function Migrate-FSLogixContainer {
             ConvertedSize = $null
             Skipped       = $false
             Error         = $_.Exception.Message
+            LogMessages   = $script:LogMessages.ToArray()
         }
     }
 }
