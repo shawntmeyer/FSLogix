@@ -349,6 +349,7 @@ function Invoke-ConcurrentMigration {
             $DebugPreference
         )
 
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
         Import-Module $ModulePath -Force
         # Do NOT call Set-LogFilePath here. Runspaces accumulate messages in $script:LogMessages
         # and return them in the result object. The main thread is the sole writer to the log file.
