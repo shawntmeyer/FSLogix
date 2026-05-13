@@ -405,7 +405,13 @@ function Invoke-ConcurrentMigration {
             }
             foreach ($msg in $job.Pipe.Streams.Verbose) { Write-Verbose $msg.Message }
             foreach ($msg in $job.Pipe.Streams.Debug)   { Write-Debug   $msg.Message }
-            $items = $job.Pipe.EndInvoke($job.Status)
+            try {
+                $items = $job.Pipe.EndInvoke($job.Status)
+            }
+            catch {
+                Write-Log "[$($job.Container.FolderName)] Failed to collect job result: $_" -Level ERROR
+                $items = @()
+            }
             if ($items.Count -gt 0) {
                 foreach ($item in $items) {
                     # Flush messages accumulated inside the runspace to the log file.

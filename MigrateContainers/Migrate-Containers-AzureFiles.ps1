@@ -605,7 +605,13 @@ function Invoke-ConcurrentMigration {
         $newlyCompleted = ($jobs | Where-Object { $_.Status.IsCompleted -and $_.Collected -ne $true })
         
         foreach ($job in $newlyCompleted) {
-            $result = $job.Pipe.EndInvoke($job.Status)
+            try {
+                $result = $job.Pipe.EndInvoke($job.Status)
+            }
+            catch {
+                Write-Log "[$($job.Container.FolderName)] Failed to collect job result: $_" -Level ERROR
+                $result = $null
+            }
             $results += [PSCustomObject]$result
             $job.Pipe.Dispose()
             $job | Add-Member -NotePropertyName Collected -NotePropertyValue $true -Force

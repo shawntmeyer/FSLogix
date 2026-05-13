@@ -557,6 +557,15 @@ function Migrate-FSLogixContainer {
             Write-Log "[$($Container.FolderName)] Converting to dynamic $OutputType..."
             Convert-VHD -Path $tempVHDPath -DestinationPath $tempOutputPath -VHDType Dynamic -DeleteSource -ErrorAction Stop
 
+            Write-Log "[$($Container.FolderName)] Optimizing converted disk to reduce size..."
+            try {
+                Optimize-VHD -Path $tempOutputPath -Mode Full -ErrorAction Stop
+                Write-Log "[$($Container.FolderName)] Optimization complete"
+            }
+            catch {
+                Write-Log "[$($Container.FolderName)] Warning: Could not optimize disk (non-critical): $_" -Level WARNING
+            }
+
             $convertedSize    = (Get-Item $tempOutputPath).Length
             $convertedSizeGB  = [math]::Round($convertedSize / 1GB, 2)
             Write-Log "[$($Container.FolderName)] Conversion complete ($convertedSizeGB GB). Copying to destination..." -Level SUCCESS
