@@ -349,20 +349,61 @@ function Invoke-ConcurrentMigration {
             $DebugPreference
         )
 
-        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
-        Import-Module $ModulePath -Force
-        # Do NOT call Set-LogFilePath here. Runspaces accumulate messages in $script:LogMessages
-        # and return them in the result object. The main thread is the sole writer to the log file.
+        try {
+            Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 
-        return Migrate-FSLogixContainer `
-            -Container       $Container `
-            -SourceUNCPath   $SourceUNCPath `
-            -DestUNCPath     $DestUNCPath `
-            -Rename          $Rename `
-            -TempPath        $TempPath `
-            -OutputType      $OutputType `
-            -SameLocation    $SameLocation `
-            -ForceConversion $ForceConversion
+            # Retry module import with jitter to avoid SMB contention when many runspaces start simultaneously
+            $moduleImported = $false
+            $moduleAttempts = 3
+            for ($attempt = 1; $attempt -le $moduleAttempts; $attempt++) {
+                try {
+                    Import-Module $ModulePath -Force -ErrorAction Stop
+                    $moduleImported = $true
+                    break
+                }
+                catch {
+                    if ($attempt -lt $moduleAttempts) {
+                        # Random jitter (1-5 seconds) so retrying runspaces don't collide again
+                        $jitter = Get-Random -Minimum 1000 -Maximum 5000
+                        Write-Warning "[$($Container.FolderName)] Module import attempt $attempt failed, retrying in $($jitter)ms: $_"
+                        Start-Sleep -Milliseconds $jitter
+                    }
+                    else {
+                        throw "Module import failed after $moduleAttempts attempts: $_"
+                    }
+                }
+            }
+            # Do NOT call Set-LogFilePath here. Runspaces accumulate messages in $script:LogMessages
+            # and return them in the result object. The main thread is the sole writer to the log file.
+
+            return Migrate-FSLogixContainer `
+                -Container       $Container `
+                -SourceUNCPath   $SourceUNCPath `
+                -DestUNCPath     $DestUNCPath `
+                -Rename          $Rename `
+                -TempPath        $TempPath `
+                -OutputType      $OutputType `
+                -SameLocation    $SameLocation `
+                -ForceConversion $ForceConversion
+        }
+        catch {
+            # Catch any error that escaped Migrate-FSLogixContainer (e.g. module import failure).
+            # Write-Warning goes to Streams.Warning which the collector always flushes,
+            # so the error is visible even if the return object is lost.
+            Write-Warning "[$($Container.FolderName)] Fatal runspace error: $_"
+            return [PSCustomObject]@{
+                Success       = $false
+                SourceFolder  = $Container.FolderName
+                DestFolder    = $null
+                SourceVHD     = $Container.VHDName
+                DestOutput    = $null
+                OriginalSize  = $Container.VHDSize
+                ConvertedSize = $null
+                Skipped       = $false
+                Error         = "Fatal runspace error: $_"
+                LogMessages   = @()
+            }
+        }
     }
 
     $jobs = @()
@@ -405,6 +446,7 @@ function Invoke-ConcurrentMigration {
             }
             foreach ($msg in $job.Pipe.Streams.Verbose) { Write-Verbose $msg.Message }
             foreach ($msg in $job.Pipe.Streams.Debug)   { Write-Debug   $msg.Message }
+            foreach ($msg in $job.Pipe.Streams.Warning) { Write-Log "[$($job.Container.FolderName)] $($msg.Message)" -Level WARNING }
             try {
                 $items = $job.Pipe.EndInvoke($job.Status)
             }
